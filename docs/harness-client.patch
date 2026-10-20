@@ -1,0 +1,190 @@
+diff --git a/packages/client/ui-commands/src/client/contract.ts b/packages/client/ui-commands/src/client/contract.ts
+index 5cca3ee174..d74ab3f861 100644
+--- a/packages/client/ui-commands/src/client/contract.ts
++++ b/packages/client/ui-commands/src/client/contract.ts
+@@ -131,6 +131,24 @@ export interface CommandDecoration {
+   readonly ui: CommandUiSpec
+ }
+ 
++/**
++ * Presentation override for one HOST command's composer menu row. This never
++ * manufactures a row and never changes invocation semantics: the host
++ * descriptor keeps its name, argument claim, and lifecycle. Registrants own
++ * the localized copy and the glyph, so a feature command looks exactly like
++ * the built-in rows instead of falling back to a bare catalog description.
++ */
++export interface CommandRowFaceDecoration {
++  /** The HOST command name whose row this decorates (without the leading slash). */
++  readonly name: string
++  /** Localized menu row title; the catalog name when omitted. */
++  label?(): string
++  /** Localized menu row description; the catalog description when omitted. */
++  description?(): string
++  /** Menu row glyph; any component with the shared icon props is accepted. */
++  readonly icon?: ComponentType<IconProps>
++}
++
+ /** The `ctx.commandUi` service face visible to business packages. */
+ export interface CommandUiContract {
+   /**
+@@ -143,6 +161,14 @@ export interface CommandUiContract {
+    * Duplicate names throw at registration.
+    */
+   decorate(decoration: CommandDecoration): () => void
++  /**
++   * Override the menu row face of one host command; effect disposer (rides
++   * the caller's fiber). Duplicate faces throw; the row still exists only
++   * while the host catalog provides the command.
++   * @param face - host command name plus localized label, description, glyph.
++   * @returns the disposer removing the face override.
++   */
++  decorateFace(face: CommandRowFaceDecoration): () => void
+   /** Close this command's open popups and confirmations without consuming composer drafts. */
+   dismiss(name: string): void
+   /** Resolve the per-session popup controller for one session scope (wiring/overlay layer). */
+diff --git a/packages/client/ui-commands/src/client/index.ts b/packages/client/ui-commands/src/client/index.ts
+index a629bd3240..4e570d93e0 100644
+--- a/packages/client/ui-commands/src/client/index.ts
++++ b/packages/client/ui-commands/src/client/index.ts
+@@ -27,7 +27,7 @@ export { filterOptions, PopupSelectController } from './popup.ts'
+ export type { PopupSelectDeps, PopupSpec, PopupState, TokenSegment } from './popup.ts'
+ export type { PopupSelectInjected, PopupSelectViewProps } from './PopupSelectView.tsx'
+ export type {
+-  ActionSpec, CommandContribution, CommandDecoration, CommandUiContract, CommandUiSpec, PopupSearchLabels, PopupSelectSpec,
++  ActionSpec, CommandContribution, CommandDecoration, CommandRowFaceDecoration, CommandUiContract, CommandUiSpec, PopupSearchLabels, PopupSelectSpec,
+   SelectConfirmation, SelectOption, SelectOptionGroup, PopupSearchMode,
+ } from './contract.ts'
+ export type { CommandKey } from './locales.ts'
+diff --git a/packages/client/ui-commands/src/client/service.ts b/packages/client/ui-commands/src/client/service.ts
+index f2b52604b2..288f03aa2d 100644
+--- a/packages/client/ui-commands/src/client/service.ts
++++ b/packages/client/ui-commands/src/client/service.ts
+@@ -28,7 +28,7 @@ import type {
+   CandidateRequest, ClientSessionContext, CommandClaim, PickOutcome, InputTriggerCandidate, InputTriggerPick,
+   SubmitAttachment, SubmitEnvelope, SubmitOutcome,
+ } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+-import type { CommandContribution, CommandDecoration, CommandUiContract } from './contract.ts'
++import type { CommandContribution, CommandDecoration, CommandRowFaceDecoration, CommandUiContract } from './contract.ts'
+ import type { CommandDescriptor } from './directory.ts'
+ import { CommandDirectory } from './directory.ts'
+ import { PopupSelectController } from './popup.ts'
+@@ -69,6 +69,7 @@ function submittedCommandName(line: string): string {
+ interface LiveState {
+   readonly contributions: Map<string, CommandContribution>
+   readonly decorations: Map<string, CommandDecoration>
++  readonly faces: Map<string, CommandRowFaceDecoration>
+   readonly popups: WeakMapWithValues<SessionBinding, PopupSelectController<ClientSessionContext>>
+ }
+ 
+@@ -80,6 +81,7 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
+   private readonly live: LiveState = {
+     contributions: new Map(),
+     decorations: new Map(),
++    faces: new Map(),
+     popups: new WeakMapWithValues(),
+   }
+   /** `command`-namespace translator (composer refusal notices). */
+@@ -166,6 +168,24 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
+     return () => { void dispose() }
+   }
+ 
++  /**
++   * Override the menu row face of one host command; effect disposer (rides the
++   * caller's fiber). Duplicate faces throw.
++   * @param face - host command name + localized label, description, glyph.
++   * @returns the disposer removing the registration.
++   */
++  decorateFace(face: CommandRowFaceDecoration): () => void {
++    const dispose = this.ctx.effect(() => {
++      const { faces } = this.live
++      if (faces.has(face.name)) {
++        throw new Error(`ui-commands: duplicate row face for /${face.name}`)
++      }
++      faces.set(face.name, face)
++      return () => { faces.delete(face.name) }
++    }, 'command.decorateFace()')
++    return () => { void dispose() }
++  }
++
+   /**
+    * Close every open popup for a command whose options have become stale.
+    * Pending loads and confirmations lose their binding; drafts stay intact.
+@@ -229,7 +249,7 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
+       seen.add(c.name)
+       rows.push({
+         name: c.name,
+-        ...(builtinRowFace(c, this.t) ?? { description: c.description }),
++        ...(builtinRowFace(c, this.t) ?? this.decoratedRowFace(c) ?? { description: c.description }),
+         ...(c.input !== undefined ? { hint: c.input.hint } : {}),
+       })
+     }
+@@ -249,6 +269,22 @@ export class CommandUiRuntime extends Service implements CommandUiContract {
+     return req.query === '' ? sectionRows(visible, this.t) : rankByName(visible, req.query)
+   }
+ 
++  /**
++   * The registrant-owned face of one host command row, when a contribution
++   * decorates it; undefined leaves the catalog face untouched.
++   * @param descriptor - effective host command descriptor.
++   * @returns the row label/description/glyph override, or undefined.
++   */
++  private decoratedRowFace(descriptor: CommandDescriptor): Pick<InputTriggerCandidate, 'label' | 'description' | 'icon'> | undefined {
++    const face = this.live.faces.get(descriptor.name)
++    if (face === undefined) return undefined
++    return {
++      ...(face.label === undefined ? {} : { label: face.label() }),
++      description: face.description === undefined ? descriptor.description : face.description(),
++      ...(face.icon === undefined ? {} : { icon: face.icon }),
++    }
++  }
++
+   /** Decision table, menu column: contribution/decorated-host → popup or action; host input → claim; host bare → detached execute. */
+   private dispatch(pick: InputTriggerPick): PickOutcome {
+     const name = pick.candidate.name
+diff --git a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
+index 761ae2dc0f..f59f5eafbb 100644
+--- a/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
++++ b/packages/client/ui-settings-general/src/client/SettingsRoot.tsx
+@@ -16,7 +16,7 @@ import clsx from 'clsx'
+ import {
+   ConnectionIndicator, Tooltip, useModalLayer,
+   IconAgentPresetOutlineMedium, IconArchiveOutlineMedium, IconCloseOutlineRegular, IconDataOutlineMedium,
+-  IconPersonalizationOutlineMedium, IconSettingsOutlineMedium, IconUserOutlineMedium,
++  IconPersonalizationOutlineMedium, IconSettingsOutlineMedium, IconSkillOutlineMedium, IconUserOutlineMedium,
+ } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { ConnectionIndicatorState } from '@deepseek-ai/dsh-client-ui-primitives'
+ import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
+@@ -28,6 +28,21 @@ const RECOVERY_CONFIRMATION_MS = 2_000
+ /** Minimum visible time for the connecting pill; shorter attempts read as flicker. */
+ const CONNECTING_MIN_VISIBLE_MS = 800
+ 
++/**
++ * Memory section glyph: a saved bookmark with a recall sparkle. Feature
++ * sections outside the shared icon set can own a small inline glyph here so
++ * the nav rail stays consistent; the artwork follows the 16px medium-stroke
++ * convention (currentColor, 1.3px stroke).
++ */
++function MemoryNavIcon({ size = 16, className }: { size?: number | undefined; className?: string | undefined }) {
++  return (
++    <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" strokeWidth={1.3}>
++      <path d="M4.6 2.25h6.8c.4142 0 .75.3358.75.75v10.04c0 .4072-.4655.6411-.7887.4084L8 11.09l-3.3613 2.3594c-.3232.2327-.7887-.0012-.7887-.4084V3c0-.4142.3358-.75.75-.75Z" stroke="currentColor" strokeLinejoin="round" />
++      <path d="M13.35 9.16c.16.94.55 1.33 1.49 1.49-.94.16-1.33.55-1.49 1.49-.16-.94-.55-1.33-1.49-1.49.94-.16 1.33-.55 1.49-1.49Z" fill="currentColor" />
++    </svg>
++  )
++}
++
+ /** Nav glyph by section id; unknown ids fall back to the settings gear. */
+ function navIcon(id: string) {
+   if (id === 'account') return <IconUserOutlineMedium className={css.navIcon} size={16} />
+@@ -35,6 +50,11 @@ function navIcon(id: string) {
+   if (id === 'agent-presets') return <IconAgentPresetOutlineMedium className={css.navIcon} size={16} />
+   if (id === 'plugins') return <IconPersonalizationOutlineMedium className={css.navIcon} size={16} />
+   if (id === 'archived-sessions') return <IconArchiveOutlineMedium className={css.navIcon} size={16} />
++  // External feature sections may claim a semantic glyph by id; 'skills' is the
++  // dsh-skill plugin's Skills page (a document with an invocation sparkle), and
++  // 'memory' is the dsh-memory plugin's saved-topic page.
++  if (id === 'skills') return <IconSkillOutlineMedium className={css.navIcon} size={16} />
++  if (id === 'memory') return <MemoryNavIcon className={css.navIcon} size={16} />
+   return <IconSettingsOutlineMedium className={css.navIcon} size={16} />
+ }
+ 
