@@ -25,6 +25,7 @@ import { createMemoryTool } from './lib/tools.js'
 import { createMemoryCommands } from './lib/commands.js'
 import { apiRoutes } from './lib/api.js'
 import { snapshotSession } from './lib/transcript.js'
+import { isSubagentSession, workspaceFromAgent } from './lib/project.js'
 
 /** Cordis plugin name. */
 export const name = 'dsh-memory'
@@ -51,7 +52,12 @@ export async function apply(ctx) {
 
   // The tool is registered only while the setting is on; toggling from the
   // settings page adds or removes it without a reload.
-  const tool = createMemoryTool({ store, extractor, logger })
+  const tool = createMemoryTool({
+    store,
+    extractor,
+    logger,
+    resolveCwd: async agent => workspaceFromAgent(agent, ctx)?.key,
+  })
   /** @type {null | (() => void)} */
   let toolDispose = null
   const syncTool = () => {
@@ -97,6 +103,90 @@ export async function apply(ctx) {
   })
 
   /**
+   * Track live sessions' workspaces so their `.dsh/dsh-memory/` directories are
+   * loaded and watched while a conversation is open.
+   * @type {Map<string, { key: string, release: () => void }>}
+   */
+  const sessionProjects = new Map()
+
+  /**
+   * Acquire (or switch) the project collection of one live agent.
+   * @param {any} agent - live agent.
+   */
+  const attachProject = (agent) => {
+    const session = agent?.session
+    if (session === undefined || session === null || isSubagentSession(session)) return
+    const sessionId = String(agent.id ?? session.id ?? '')
+    if (sessionId === '') return
+    const workspace = workspaceFromAgent(agent, ctx)
+    if (workspace === undefined) return
+    const existing = sessionProjects.get(sessionId)
+    if (existing !== undefined && existing.key === workspace.key) return
+    if (existing !== undefined) existing.release()
+    try {
+      const release = store.acquireProject({ key: workspace.key, name: workspace.name })
+      sessionProjects.set(sessionId, { key: workspace.key, release })
+    } catch (error) {
+      logger?.warn?.(`dsh-memory: cannot watch project memory for ${sessionId}: ${errorMessage(error)}`)
+    }
+  }
+
+  /**
+   * Release one live agent's project collection.
+   * @param {any} agentOrSession - agent or session id.
+   */
+  const detachProject = (agentOrSession) => {
+    const sessionId = String(
+      agentOrSession?.id
+        ?? agentOrSession?.session?.id
+        ?? agentOrSession
+        ?? '',
+    )
+    const existing = sessionProjects.get(sessionId)
+    if (existing === undefined) return
+    sessionProjects.delete(sessionId)
+    try {
+      existing.release()
+    } catch {
+      // Teardown is best-effort.
+    }
+  }
+
+  for (const agent of (() => {
+    try {
+      return ctx.agents.list()
+    } catch {
+      return []
+    }
+  })()) {
+    attachProject(agent)
+  }
+  ctx.on('agent/created', (payload) => { attachProject(payload?.agent ?? payload) })
+  ctx.on('agent/disposed', (payload) => { detachProject(payload?.agent ?? payload) })
+  ctx.on('session/disposed', (session) => { detachProject(session) })
+  ctx.on('session/event', (sessionOrPayload, maybeEvent) => {
+    const session = sessionOrPayload?.session ?? sessionOrPayload
+    const event = sessionOrPayload?.event ?? maybeEvent
+    if (event?.type !== 'working-directory/change') return
+    try {
+      attachProject(ctx.agents.get(String(session?.id)))
+    } catch {
+      // A missing agent simply has no project collection to switch.
+    }
+  })
+  ctx.effect(() => () => {
+    for (const entry of sessionProjects.values()) {
+      try {
+        entry.release()
+      } catch {
+        // Teardown is best-effort.
+      }
+    }
+    sessionProjects.clear()
+    store.dispose()
+  }, 'dsh-memory: project collections')
+
+  /**
    * Resolve one live session's workspace facts for the HTTP API.
    * @param {string | undefined} sessionId - browser-supplied session id.
    * @returns {Promise<{ cwd?: string, project?: { key: string, name: string }, live: boolean }>}
@@ -106,12 +196,10 @@ export async function apply(ctx) {
     try {
       const agent = ctx.agents.get(sessionId)
       if (agent === undefined) return { live: false }
-      const cwd = agent.session?.header?.cwd
-      const project = typeof cwd === 'string' ? store.projectFor(cwd) : undefined
+      const workspace = workspaceFromAgent(agent, ctx)
       return {
         live: true,
-        ...(typeof cwd === 'string' ? { cwd } : {}),
-        ...(project === undefined ? {} : { project }),
+        ...(workspace === undefined ? {} : { cwd: workspace.key, project: { key: workspace.key, name: workspace.name } }),
       }
     } catch {
       return { live: false }
@@ -146,12 +234,17 @@ export async function apply(ctx) {
       } catch {
         title = ''
       }
+      const workspace = workspaceFromAgent(agent, ctx)
       sessions.push({
         sessionId,
         title,
         status: typeof agent.status === 'string' ? agent.status : 'idle',
         optedOut: store.isSessionOptOut(sessionId),
-        ...(typeof header.cwd === 'string' ? { cwd: header.cwd } : {}),
+        ...(workspace === undefined ? {} : {
+          cwd: workspace.key,
+          projectKey: workspace.key,
+          project: { key: workspace.key, name: workspace.name },
+        }),
       })
     }
     return sessions

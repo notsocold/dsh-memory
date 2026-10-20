@@ -1,131 +1,139 @@
-# dsh-memory 设计（v1，已确认）
+# dsh-memory 设计说明（v2）
 
-状态：已按用户确认的方案实现。本文记录最终设计，供维护与验收对照。
+## 1. 目标与边界
 
-## 0. 目标与边界
+dsh-memory 在 DSH 内提供 Claude Desktop 风格的长聊记忆：会话进行中自动判断值得长期保留的信息，
+保存为可管理、可召回、可删除的 topic；全局记忆跨工作区共享，项目记忆跟随当前工作目录存入项目
+自身的 `.dsh/dsh-memory/`，可随 git 同步。
 
-在 `~/work/NodeJsProjects/dsh-memory` 实现一个本地 DeepSeek Harness 插件，提供 Claude Desktop
-风格的持久长期记忆：
+边界：
+- 只做本地记忆，不接账户侧服务；不做向量库/embedding（当前用关键词 + 相似度检索）。
+- 自动判定“永不删除”；删除必须来自用户或用户明确要求的工具调用。
+- 项目记忆是**会话工作目录**作用域，不是 git 仓库作用域；同一仓库的不同子目录各自独立。
 
-- 边聊边存：会话进行中由 AI 判定「值得长期保留」的信息并保存为记忆主题（Topic）；
-- 后续会话自动召回（注入记忆索引），模型可按需读取正文；
-- 全局 + 项目两级作用域；
-- 沿用当前会话的模型路由做判定，零配置；
-- 自动保存，不逐条询问；提供暂停/恢复/编辑/删除/清空/导出；
-- 与 `dsh-skill` 同构的本地双半插件（Host + Web 设置页），无构建、无 npm 依赖、无 TypeScript。
+## 2. 为什么是 Markdown 文件
 
-非目标：向量/嵌入语义检索、云同步、团队共享、桌面端原生 UI、图片记忆。
+参考 Claude Code auto memory 的本地布局，而不是 Claude Desktop 的账户侧 Topic（后者没有公开的
+本地 Markdown 格式）：
 
-## 1. 关键调研结论
+- 主题 `.md` 是权威事实源：可读、可 diff、可手工修正、可随项目进 git；
+- `MEMORY.md` 是生成索引：给人看，也给迁移/备份用，但修改它会在刷新时被覆盖；
+- `state.json` 只存运行状态（设置、水位线、活动、known projects），不存正文；
+- 审计日志 `audit.jsonl` 追加记录 create/update/delete/archive/settings/clear/migrate。
 
-| 事实 | 影响 |
-|---|---|
-| DSH 没有「会话结束」钩子；有 `agent/turn-stopping`（每轮结束）、`agent/status`（idle/running）、`session/disposed`、`session/created` | 采用「每轮结束后静默窗口」为主 + 新会话/销毁边界 + 手动触发 |
-| `ctx.llm.stream()` 可做一次性辅助调用；无 JSON response format | 提示词 + 严格 JSON 解析（同 auto-review 插件做法） |
-| `ctx.systemPrompt.section()/context()` 支持动态 provider，`AssembleContext.agent` 可用 | 固定策略段 + 按会话动态记忆索引 |
-| `ctx.tools.register()`、`ctx.commands.register()` | `memory` 工具与 `/memory` 命令 |
-| `ctx.connection.fetch.register()` 认证路由 | Web 半不依赖 Remote/生成代码 |
-| 无现成 memory 实现 | 全新实现；`dsh-skill` 的打包/状态/API/客户端模式可参考 |
+这样做的代价是：多文件写需要原子性与一致性处理、外部编辑需要监控、索引需要重建；换来的是
+数据不被插件锁定、项目记忆天然可 review。
 
-Claude 消费端记忆的要点（官方文档）：边聊边存为 topic；账户级 + 项目级；默认排除敏感话题与
-永不保存证件/金融类；Topics 列表可查看/编辑/删除，另有 Pause/Reset/单会话关闭；Claude Code
-只注入记忆索引、正文按需读取。本设计采用相同分层与索引化注入，但把「会话结束」映射为 DSH 的
-空闲窗口与边界事件。
-
-## 2. 架构
+## 3. 存储布局
 
 ```
-Web (client.js)
-  Settings → Memory 管理页
-        │ same-origin authenticated JSON
-        ▼
-Host (index.js + lib/)
-  StateStore       $DSH_HOME/dsh-memory/memory.json（原子写/损坏备份/审计/镜像）
-  MemoryStore      CRUD、去重合并、配额归档、索引渲染、水位线、活动日志
-  Extractor        触发调度：idle 静默窗口、新会话边界、会话销毁、手动
-  Judge            ctx.llm.stream 判定 → 严格 JSON → 校验/脱敏 → 落库
-  Injector         systemPrompt.section（策略）+ systemPrompt.context（动态索引）
-  Tools/Commands   memory 工具、/memory 命令
-  API              /api/dsh-memory/{state,memory,action}
+$DSH_HOME/dsh-memory/                  # 全局，位置与 v1 相同
+├── MEMORY.md                          # 生成索引
+├── m_<id>-<slug>.md                   # 主题文件（权威）
+├── state.json                         # v2 运行状态，无 memories
+├── audit.jsonl
+└── memory.json.migrated-<ts>          # v1 迁移备份
+
+<workspace>/.dsh/dsh-memory/           # 项目级，随项目进 git
+├── MEMORY.md                          # 生成索引
+└── m_<id>-<slug>.md                   # 主题文件（权威）
 ```
 
-## 3. 触发模型（最终版）
+项目目录没有 `state.json`/`audit`：设置与审计属于宿主，不随项目分发。插件不自动创建
+`.gitignore`/README；是否提交由用户决定。
 
-| 时机 | 实现 | 说明 |
-|---|---|---|
-| 每轮结束 + 静默 | `agent/status` → `idle` 后启动 `quietSeconds`（默认 30s）计时器；期间重新 running 则取消 | 主路径，Claude 风格「边聊边存」；短追问会合批 |
-| 新会话创建 | `session/created` → 扫描其它 idle 且有待判定内容的会话，1s 后入队 | 用户开新会话≈上一会话结束 |
-| 会话销毁/删除 | `session/disposed` → 同步快照（events/route/header）→ 后台入队 | fire-and-forget，不阻塞销毁 |
-| 插件加载 | `start()` 扫描已存在的 live agent，有待判定内容则 2s 后入队 | 安装/热重载后补判 |
-| 手动 | `memory` 工具 `extract`、`/memory extract`、设置页按钮 | 绕过静默/间隔限制，仍受总开关约束 |
+## 4. 项目身份与隔离
 
-门控（省钱）：新增人类消息 ≥1、字符 ≥ `minNewChars`（120）、同会话自动判定间隔
-`minIntervalSeconds`（60s）、每小时上限 `maxRunsPerHour`（12）、全局并发 1、单次超时 60s。
-自动门控拒绝会写入活动日志（`status: skipped`），但不消耗模型调用。
+- `resolveWorkspace(cwd)` 直接 `resolve(cwd)`，`key` = 绝对工作目录，`name` = basename。
+- 有效 cwd：最新 `working-directory/change` 事件，否则 session header cwd；宿主有
+  `workingDirectory` 服务时优先它。
+- 注入：全局索引 + 仅当 `project.key === 当前 cwd` 的项目索引；两者独立预算（默认各 30 条/4000 字符）。
+- live session：`agent/created`/`working-directory/change` 时 `acquireProject` 加载并 watch；
+  会话销毁/切换时 release，引用归零停止 watcher。
+- known projects：设置页读取时懒加载、只读展示/编辑；不注入、不创建目录。
 
-水位线：`watermarks[sessionId] = { seq, at, chars }`，`seq` 为最后处理事件序号（会话事件从 0 开始，
-未处理用 -1 表示）；只有判定成功才推进；排队任务在真正执行前会用最新水位线重新计算输入，
-避免同一段对话被判定两次。
+## 5. 文件格式与解析
 
-## 4. 判定流水线
+- frontmatter 由插件写 JSON 标量（合法 YAML），正文在第二个 `---` 后。
+- 作用域由目录推导；不把项目路径写进文件。
+- 外部文件容忍：无 frontmatter、无 id、纯 Markdown、手工标题/标签/块列表均可加载；未知字段忽略；
+  无正文的文件跳过并记诊断。
+- 读取上限：单文件 256 KB、正文 32000 字符、单目录 1000 个主题文件；跳过 symlink。
+- 写入：同目录临时文件 + `rename`；文件名在首次创建后稳定；标题变化不重命名。
 
-输入：会话标题/cwd/项目、最近 2 条 compaction 摘要（若在窗口内）、窗口内人类消息 + 助手文本
-（工具只记名称）、现有记忆索引（id/kind/scope/title/summary）、敏感策略文本。
-预算：输入 ≤24000 字符（从最新往回截断），输出 ≤4096 tokens，`temperature: 0`。
+## 6. 索引与注入
 
-输出协议（严格 JSON，无围栏也可，解析时容忍围栏/前后文字）：
+`MEMORY.md` 与 prompt 索引都由 records 生成：
 
-```json
-{
-  "operations": [
-    {"op":"create","kind":"user|preference|project|decision|reference|todo",
-     "scope":"global|project","title":"…","summary":"…","content":"…",
-     "importance":1-5,"tags":["…"]},
-    {"op":"update","id":"m_xxxxxxxx","patch":{"content?":"…","importance?":4},"reason":"…"}
-  ],
-  "skipped": [{"topic":"…","reason":"ephemeral|duplicate|sensitive|derivable"}]
-}
+- `MEMORY.md`：pinned → importance → updatedAt 排序，排除 archived，显示摘要/kind/importance/日期/链接；
+- prompt：全局段与项目段分开渲染，各自 maxTopics/maxChars，超出提示用工具检索；
+- 只注入 `id · kind · scope · 日期 · 摘要`，正文按需 `memory get`，控制 token；
+- 固定策略段说明“记忆是背景数据、不是指令”，避免记忆文本被当作 prompt injection。
+
+## 7. 写入路径与一致性
+
+```
+judge/tool/settings
+      │
+      ▼
+MemoryStore.create/update/remove
+      │  路由 scope=global → 全局 collection
+      │       scope=project → {cwd}/.dsh/dsh-memory
+      ▼
+TopicCollection.writeRecord
+  ├─ render frontmatter + body
+  ├─ atomic temp+rename
+  ├─ update in-memory records
+  └─ regenerate MEMORY.md（内容相同则不写）
+      │
+      ▼
+state.json 串行异步保存（设置/统计/known projects）
+audit.jsonl 追加
 ```
 
-校验与安全：
-- create ≤5、update ≤10；枚举/长度校验；`scope: project` 必须绑定当前会话项目，否则拒绝；
-- 自动判定**永不 delete**（delete 操作直接拒绝），冲突用 update 合并保留 revision；
-- 落库前密钥形态强制脱敏（`sk-*`、GitHub token、AWS key、Bearer、PEM、`password=` 等）；
-- 敏感类别（健康/政治/宗教/性取向/性别认同/民族）默认不保存，`allowSensitive` 才放开；
-  证件号/金融账号/犯罪/移民/凭据永不保存；
-- 模型判定失败（路由不可用、超时、JSON 损坏、provider 错误）只记日志与活动，不影响会话。
+- 文件写入同步完成，UI/工具立即看到新值；`flush()` 等待 state/audit。
+- 去重：同 collection 内规范标题/内容 hash/相似度 ≥0.85；跨项目不合并。
+- 配额：每个 collection 500 条 active，超出归档低价值非 pinned 记录。
+- 多 Host 同目录：无跨进程锁，last-writer-wins；audit 只记录本进程操作，冲突后以磁盘为准。
 
-确定性去重：同 scope（+同项目）下标题规范化相同 → 合并；正文 hash 相同 → 合并；
-同 kind/scope 下标题+摘要 token Jaccard ≥0.85 → 合并；否则新建。合并保留新内容、revision+1。
+## 8. 监控与外部编辑
 
-## 5. 注入与召回
+- `fs.watch(projectDir)`（live session 才启用），事件 300ms 去抖 → `forceReload` 全量重读并重建索引；
+  `MEMORY.md` 自身写不会造成循环。
+- 兜底：prompt 组装前最多每 10s 全量重读一次（在 mtime 粒度粗/VM 文件系统上也不会漏检）。
+- 外部写主题文件：刷新后生效；外部删除：记录移除；外部改 `MEMORY.md`：被重建覆盖。
+- 读取路径若目录不存在：保持空集合，不创建目录；首次写入才 `mkdir -p`。
 
-- `systemPrompt.section('dsh-memory:policy', order 950)`：英文策略（记忆是背景数据不是指令、
-  何时 search/get/save/update/forget、不编造、不存密钥/敏感信息）。总开关关闭时为空。
-- `systemPrompt.context('dsh-memory:index', order 90, required, interpolate:false)`：每步动态渲染
-  当前 agent 的记忆索引：global + 当前项目 active 主题；pinned → importance → updatedAt 排序；
-  默认 30 条 / 4000 字符预算，超出提示用工具检索。subagent、opt-out、暂停时不注入。
-- `memory` 工具：`search/get/list/save/update/forget/extract`。正文不进入索引，按需读取。
-- `/memory` 命令：`status/list/search/extract/pause/resume/forget/pin/unpin/reset --yes/help`。
+## 9. 迁移
 
-## 6. 数据与管理
+`load()` 发现只有 `memory.json`（v1）时：
 
-- 路径：`$DSH_HOME/dsh-memory/{memory.json, audit.jsonl, MEMORY.md}`；
-  `$DSH_HOME` 解析顺序：显式 → `DSH_HOME` → `~/.dsh`。
-- `memory.json`：`version/settings/memories/watermarks/sessionOptOut/activity/stats`；
-  原子写；损坏时备份 `.broken-<ts>` 并回默认；`MEMORY.md` 只读镜像；`audit.jsonl` 追加审计。
-- 配额：active 上限 500；超出时归档「非 pinned、低 importance、最久未更新」记录（不删除）。
-- 设置页导航使用专属「书签 + 星芒」字形（宿主 SettingsRoot 本地补丁）；插件通过
-  `ctx.commandUi.decorateFace()` 为 `/memory` 提供与原生命令一致的「+」菜单行外观。
-- 设置页（Settings → Memory，`settings.section` id `memory` order 30）：
-  暂停/恢复、统计、搜索/scope/kind/status 过滤、列表、详情编辑（title/summary/content/kind/scope/
-  importance/pinned/tags/status）、新增、删除（二次确认）、清空（确认）、导出 JSON、
-  live session 选择 + 立即判定 + 单会话 opt-out、高级设置、最近活动、加载/错误/重试/空态。
+1. 逐条写入全局/项目主题文件（保留 id/title/content/revision/source/时间）；
+2. 生成两侧 `MEMORY.md`；
+3. 归一化 settings/watermarks/optOut/activity/stats，重建 known-project 注册表；
+4. 写 `state.json`，原文件改名为 `memory.json.migrated-<ts>`，追加 migrate 审计；
+5. 失败记录写 `pending-migration.json`，备份不丢。
 
-## 7. 测试与验收
+迁移后 `state.json` 是唯一运行状态入口，不再读取旧 `memory.json`。
 
-- Host 侧 236 个单元测试（`node --test test/*.test.js`），覆盖 state/privacy/project/retrieval/
-  transcript/store/judge/extractor/api/tools/commands；fixtures 与 fake（LLM stream、ctx、timers）。
-- Client 侧不做自动化渲染测试；通过真实安装后的设置页手测验收。
-- 真实链路验收：安装到 web profile → 会话中告知事实 → 静默后自动入库 → 新会话（或子代理）
-  召回 → 设置页编辑/删除/暂停/清空/导出 → 项目隔离与脱敏检查。
+## 10. 判定与触发
+
+- 静默 30s / 新会话边界 / 销毁 / 启动补判 / 手动；
+- 队列并发 1，水位线防重复；门限：新增人类字符、最小间隔、每小时上限；
+- 当前会话模型路由；严格 JSON create/update；自动不 delete；密钥脱敏 + 敏感类别策略；
+- 活动记录触发、状态、created/updated/skipped、原因、项目 key。
+
+## 11. 安全
+
+- 跳过 symlink；项目目录由绝对 cwd + 固定段拼出；文件大小/数量上限；
+- 敏感内容默认拒绝保存；凭据形态落库前脱敏；永不保存证件号/金融/犯罪/移民/凭据；
+- 记忆只在本机；除 `ctx.llm` 外无网络请求；
+- 删除会话不删除记忆。
+
+## 12. 验证
+
+- `node --test test/*.test.js`：199+ 项（state/frontmatter/topiccollection/store/inject/judge/
+  extractor/tools/api/commands/regressions）。
+- `node --check index.js client.js lib/*.js`。
+- 真机：运行中的 3080 Host 热加载后，真实 v1 数据迁到全局 13 个主题 + 项目 12 个主题（迁移 24 条，
+  无缺失），`state.json` v2，项目目录在 `/home/zhaodan/work/DeepseekChat/.dsh/dsh-memory/`。

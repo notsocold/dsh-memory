@@ -1,300 +1,255 @@
-# dsh-memory — 内部契约（v1）
+# dsh-memory — 内部契约（v2）
 
-本文件冻结宿主半（Host）与浏览器半（Client）之间的接口、模块边界与持久化 schema。
-实现必须与本文一致；修改契约需要同步改本文件、`client.js` 和测试。
+本文件冻结 Host 半、浏览器半、持久化 schema 与运行时行为。实现必须与本文一致；修改契约需同步
+`client.js`、测试与 README/DESIGN。
 
 ## 1. 项目形态
 
-- 包名 `@local/dsh-memory`，`private: true`，纯 ESM JavaScript，**无构建步骤、无 npm 依赖、无 TypeScript**。
+- 包名 `@local/dsh-memory`，`private: true`，纯 ESM JavaScript，无构建步骤、无 npm 依赖、无 TypeScript。
 - `index.js` 是 Host 入口；`client.js` 是浏览器半（lazy-CJS，只 `require('react')`）。
 - `cordis.patch.yml` 只有一行 `insert`（`id: dsh-memory`）。
 - Host 半只通过 Cordis `ctx` 与服务交互；Client 半只通过同源认证 HTTP API 拿数据。
-- 所有可调设置保存在 `$DSH_HOME/dsh-memory/memory.json` 的 `settings` 中（由设置页编辑），Host 不导出 `Config` schema。
-- 代码约定：ESM、`node:` 前缀内置模块、JSDoc 类型注释、错误用 `memoryError(code, message)`、日志用 `ctx.logger.warn/info` 且绝不影响会话。
+- 所有可调设置保存在 `$DSH_HOME/dsh-memory/state.json` 的 `settings` 中；Host 不导出 `Config` schema。
+- 代码约定：ESM、`node:` 前缀内置模块、JSDoc 类型注释、`memoryError(code, message)`、日志用
+  `ctx.logger.warn/info` 且不影响会话。
 
-## 2. 持久化
+## 2. 存储布局
 
-### 2.1 路径
+### 2.1 路径解析
 
-`resolveDshHome()` 解析顺序：显式参数 → `$DSH_HOME` → `~/.dsh`。
+`resolveDshHome()`：显式参数 → `$DSH_HOME` → `~/.dsh`。
 
 ```
-$DSH_HOME/dsh-memory/memory.json     # 唯一事实源（原子写）
-$DSH_HOME/dsh-memory/audit.jsonl     # 追加式审计日志（create/update/delete/archive/redact）
-$DSH_HOME/dsh-memory/MEMORY.md       # 只读镜像（索引 + 正文），供用户查看/备份
+$DSH_HOME/dsh-memory/
+├── MEMORY.md                  # 生成的全局索引（非事实源，可随时重写）
+├── m_<8hex>-<slug>.md         # 全局记忆主题（权威事实源，每个主题一个文件）
+├── state.json                 # 运行状态（settings/watermarks/opt-out/activity/stats/projects）
+├── audit.jsonl                # 追加式审计日志
+└── memory.json.migrated-<ts>  # 迁移后的 v1 备份（只保留，不再读取）
+
+<workspace>/.dsh/dsh-memory/
+├── MEMORY.md                  # 生成的项目索引（随项目进 git）
+└── m_<8hex>-<slug>.md         # 项目记忆主题（随项目进 git）
 ```
 
-`memory.json` 损坏时重命名为 `memory.json.broken-<ts>` 并从默认状态继续；缺失视为默认状态。
+- **项目身份 = 会话有效工作目录**（最新 `working-directory/change` 事件的 `cwd`，否则 session header
+  的 `cwd`；不再向上寻找 `.git`）。因此同一仓库的不同子目录属于不同项目作用域。
+- 项目记忆只在“当前工作目录等于该 `project.key`”的会话中注入；已知但未打开的项目的记忆可在设置页
+  只读查看/编辑（读取时加载，不注入、不自动创建目录）。
+- 不在项目记忆目录中写 `.gitignore`、README 或任何模板文件；不自动修改仓库 `.gitignore`。
+  项目目录存在时，插件只写 `MEMORY.md` 和主题文件。
+- 全局记忆位置保持 `$DSH_HOME/dsh-memory/` 不变。
+- 子目录/文件权限沿用宿主进程用户；不对文件做加密（本地明文，自行用磁盘加密/备份策略保护）。
 
-### 2.2 状态文档 schema（`version: 1`）
+### 2.2 主题文件格式
+
+主题文件是权威数据。格式为小型 YAML frontmatter + Markdown 正文：
+
+```markdown
+---
+id: "m_1a2b3c4d"
+title: "用户偏好：使用 pnpm"
+summary: "用户要求所有 Node 项目使用 pnpm。"
+kind: "preference"
+importance: 4
+tags: ["pnpm","node"]
+pinned: false
+status: "active"
+created: "2026-10-20T12:00:00.000Z"
+modified: "2026-10-20T12:34:56.000Z"
+revision: 2
+origin: "auto"
+sessionId: "session-…"
+sessionTitle: "…"
+model: "provider/model"
+---
+
+正文 Markdown，≤8000 字符。
+```
+
+- 作用域/所属项目**由文件所在目录推导**，不写进 frontmatter；因此移动文件即改作用域。
+- 字符串用 JSON 引号（合法 YAML）；标签用 JSON 流式数组。解析器兼容无引号标量、单引号、
+  块列表、未知键。
+- 容忍手工文件：无 frontmatter 时从文件名 `m_<id>`、首个标题、文件 mtime 推导；无合法 id 时用
+  `<scope>:<filename>` 的 SHA-1 前 8 位生成稳定 id；未知 kind/status/origin 回退默认值。
+- 超过 256 KB 的文件跳过并记录诊断；最多扫描 1000 个主题文件；正文载入上限 32000 字符。
+- 文件名在创建后保持稳定；标题变更不重命名文件。写入使用同目录临时文件 + `rename` 原子替换。
+- `MEMORY.md` 由插件从主题文件生成：按 pinned、importance、updatedAt 排序，排除 archived，
+  含相对链接、摘要、kind/importance/日期；越界修改会在下一次刷新时被覆盖。
+- 空目录/不存在目录的“加载”是只读的，不会创建目录；只有真正写入主题/迁移时才 `mkdir -p`。
+
+### 2.3 运行状态 `state.json`（`version: 2`）
 
 ```jsonc
 {
-  "version": 1,
+  "version": 2,
   "settings": {
-    "enabled": true,                 // 总开关：false 时读写/注入全部暂停
-    "autoExtract": true,             // 自动判定开关
-    "quietSeconds": 30,              // 一轮结束后静默多久触发判定（3-600）
-    "minNewChars": 120,              // 自上次判定以来新增人类字符下限
-    "minIntervalSeconds": 60,        // 同一会话两次自动判定最小间隔
-    "maxRunsPerHour": 12,            // 同一会话每小时自动判定上限
-    "maxTopicsInPrompt": 30,         // 注入索引的最大条数
-    "maxIndexChars": 4000,           // 注入索引的最大字符数
-    "projectsEnabled": true,         // 是否注入项目级记忆
-    "redactSecrets": true,           // 落库前密钥脱敏
-    "toolEnabled": true,             // 是否向模型暴露 memory 工具
-    "allowModelDelete": true,        // 模型可否在用户要求时 forget
-    "allowSensitive": false,         // 是否允许保存敏感类别（默认拒绝）
-    "judgeProvider": "",             // 空 = 沿用当前会话路由
+    "enabled": true,
+    "autoExtract": true,
+    "quietSeconds": 30,
+    "minNewChars": 120,
+    "minIntervalSeconds": 60,
+    "maxRunsPerHour": 12,
+    "maxTopicsInPrompt": 30,          // 全局索引预算
+    "maxIndexChars": 4000,
+    "projectMaxTopicsInPrompt": 30,   // 项目索引独立预算
+    "projectMaxIndexChars": 4000,
+    "projectsEnabled": true,
+    "redactSecrets": true,
+    "toolEnabled": true,
+    "allowModelDelete": true,
+    "allowSensitive": false,
+    "judgeProvider": "",
     "judgeModel": ""
   },
-  "memories": [ /* MemoryRecord[]，见 2.3 */ ],
-  "watermarks": {
-    "<sessionId>": { "seq": 0, "at": "ISO", "chars": 0 }
-  },
+  "watermarks": { "<sessionId>": { "seq": 0, "at": "ISO", "chars": 0 } },
   "sessionOptOut": { "<sessionId>": true },
-  "activity": [ /* ActivityEntry[]，最多 100 条，最新在前 */ ],
-  "stats": { "created": 0, "updated": 0, "deleted": 0, "runs": 0, "errors": 0 }
-}
-```
-
-### 2.3 MemoryRecord（记忆主题）
-
-```jsonc
-{
-  "id": "m_1a2b3c4d",                 // m_ + 8 位小写 hex，全局唯一
-  "title": "用户偏好：使用 pnpm",       // ≤120 字符
-  "summary": "用户要求所有 Node 项目使用 pnpm。", // ≤240 字符，索引展示用
-  "content": "……",                    // ≤8000 字符，正文
-  "kind": "user | preference | project | decision | reference | todo",
-  "scope": "global | project",
-  "project": null | { "key": "/abs/git/root", "name": "dsh-memory" },
-  "tags": ["pnpm"],                   // ≤8 个，每个 ≤40 字符
-  "importance": 3,                    // 1-5 整数
-  "pinned": false,
-  "status": "active | archived",
-  "createdAt": "ISO", "updatedAt": "ISO",
-  "revision": 1,                      // 每次 update +1
-  "source": {
-    "sessionId": "…", "sessionTitle": "…",
-    "origin": "auto | tool | manual | import",
-    "model": "deepseek-official/deepseek-flash"
+  "activity": [ /* ≤100，最新在前，可带 projectKey */ ],
+  "stats": { "created": 0, "updated": 0, "deleted": 0, "runs": 0, "errors": 0, "migrated": 0 },
+  "projects": {
+    "/abs/workspace": {
+      "name": "workspace",
+      "memoryDir": "/abs/workspace/.dsh/dsh-memory",
+      "lastSeenAt": "ISO",
+      "lastReadAt": "ISO?", "lastWriteAt": "ISO?",
+      "error": "optional"
+    }
   }
 }
 ```
 
-- 种类语义：`user` 用户身份/背景；`preference` 偏好与协作反馈；`project` 项目事实/约定/环境；
-  `decision` 重要决策与结论；`reference` 外部资源；`todo` 未完成事项。
-- 去重：同 scope（及同 project key）下标题规范化相同 → 合并为 update；内容 hash 相同 → skip；
-  相似度 ≥0.85 → 合并；其余 create。合并保留较新内容并 `revision + 1`。
-- 配额：active 记录默认上限 500；超出时把「非 pinned、importance 最低、最久未更新」的 active 记录
-  置为 `archived`（不删除）。
-- 自动判定**永不 delete**；删除只来自用户 UI、`/memory forget` 或模型在用户明确要求时调用工具。
+- `state.json` **不含 memories**。
+- `state.json` 损坏 → 备份为 `state.json.broken-<ts>` 后从默认状态继续；缺失视为默认。
+- 写入串行化（同进程），同目录临时文件 + `rename`；正常操作失败抛 `io-error`，审计失败只告警。
+- `state.json` 中所有 map 键经过 `isSafeMapKey` 防原型污染；设置值按类型/范围归一化。
 
-### 2.4 ActivityEntry
+### 2.4 v1 迁移
+
+启动时若只有 `memory.json`（v1，含 `memories[]`）：
+
+1. 把全局记录写入 `$DSH_HOME/dsh-memory/m_*.md`，项目记录写入
+   `{record.project.key}/.dsh/dsh-memory/m_*.md`；
+2. 生成两侧 `MEMORY.md`；
+3. 把 settings/watermarks/optOut/activity/stats 归一化为 v2，并登记 known projects；
+4. 写 `state.json`，把原文件重命名为 `memory.json.migrated-<ts>`；
+5. 追加 `op:"migrate"` 审计；失败记录（例如目录不可写）保留在 `pending-migration.json`，
+   原始备份仍完整保留。
+- 迁移是幂等的：`state.json` 存在后不再读取旧 `memory.json`。
+
+## 3. MemoryRecord
 
 ```jsonc
 {
-  "at": "ISO", "sessionId": "…", "sessionTitle": "…",
-  "trigger": "quiet | boundary | dispose | manual | tool-extract",
-  "status": "ok | skipped | error",
-  "created": 0, "updated": 0, "skipped": 0,
-  "reason": "…",        // skipped/error 时的简短原因（≤200 字符）
-  "durationMs": 123
+  "id": "m_1a2b3c4d",
+  "title": "…",                 // ≤120
+  "summary": "…",               // ≤240
+  "content": "…",               // ≤8000
+  "kind": "user | preference | project | decision | reference | todo",
+  "scope": "global | project",
+  "project": null | { "key": "/abs/workspace", "name": "workspace" },
+  "tags": ["…"],                // ≤8 × ≤40
+  "importance": 3,              // 1-5
+  "pinned": false,
+  "status": "active | archived",
+  "createdAt": "ISO", "updatedAt": "ISO",
+  "revision": 1,
+  "source": { "origin": "auto | tool | manual | import", "sessionId": "…", "sessionTitle": "…", "model": "…" }
 }
 ```
 
-## 3. 模块契约（`lib/`）
+- `scope/project` 在运行时用于路由；持久化位置本身就是作用域。
+- 同一 collection（全局或某项目）内的去重：规范化标题相等、内容 hash 相等、或同 kind 且
+  `similarity ≥ 0.85` → 合并为 update；跨 collection 永不合并。
+- 每个 collection 最多 500 条 active；超出时归档 importance 最低、最旧且非 pinned 的记录。
+- 自动判定永不删除；删除只来自用户/显式工具。
 
-### 3.1 `lib/state.js`
+## 4. Host 侧接口
 
-- `resolveDshHome(explicit?)`, `expandHome(value)`, `errorMessage(error)`, `isMissing(error)`, `apiErrorOf(error)`。
-- `memoryError(code, message)` — `code ∈ {invalid-request, not-found, io-error, disabled, judge-failed, session-not-live, internal}`。
-- `defaultState()`, `normalizeState(raw)`（丢弃未知/坏字段，不抛）。
-- `class StateStore { constructor({home?}); home; root; statePath; auditPath; mirrorPath; async load(); async save(); async appendAudit(entry); }`
-  - `save()` 同目录临时文件 + rename 原子写。
-  - `appendAudit(entry)` 追加一行 JSON，失败只 warn（由调用方传 logger 或静默）。
+`MemoryStore`（`lib/store.js`）关键方法：
 
-### 3.2 `lib/privacy.js`
+| 方法 | 语义 |
+|---|---|
+| `load()` | 读 state、执行 v1→v2 迁移、加载并 watch 全局 collection |
+| `create(input, meta)` | 按 scope/project 路由；同 collection 去重；写文件 + 索引 + 审计 |
+| `update(id, patch, meta)` | `projectKey` 用于定位；支持移动 scope/project |
+| `remove(id, meta)` / `clear({projectKey?})` | 删主题文件；`clear()` 无 projectKey 时清全局+已知项目 |
+| `get/list/search` | 合并已加载 collection；工具调用按当前项目过滤，设置页可看全部 |
+| `indexForPrompt({projectKey})` | 全局 + 当前项目两段索引，分别使用独立预算 |
+| `indexForJudge(projectKey)` | 判定用的紧凑全局+项目索引 |
+| `acquireProject(project)` | 为 live session 加载并 watch 项目目录，返回 release |
+| `loadKnownProjects()` | 只读加载 known projects（不创建目录、不注入） |
+| `refreshIfStale()` | 10s 节流的兜底全量重读（mtime 不可靠时仍能发现外部编辑） |
+| `flush()` / `dispose()` | 等待 state/audit 落盘 / 关闭 watcher |
 
-- `redactSecrets(text)` → `{ text, hits: string[] }`：识别并替换 `sk-*`、`ghp_/gho_/ghu_/ghs_/ghr_`、
-  `AKIA/ASIA`、`Bearer <token>`、PEM 私钥块、`password/passwd/pwd/secret/api_key/token =` 形态的值。
-- `sanitizeText(value, maxChars)` → 去控制字符、压缩空白、截断、可选脱敏。
-- `HARD_SENSITIVE_TOPICS`（政府证件、金融账号、犯罪记录、移民身份）与 `SENSITIVE_TOPICS`
-  （健康、政治、宗教、性别认同、性取向、民族/国籍）的英文标签，供判定提示词使用。
-- `looksCredentialLike(text)` 供判定结果兜底拒绝。
+`StateStore`（`lib/state.js`）：`read()` → `{state}` 或 `{legacy}`；`save()` 串行原子写；`appendAudit()`；
+`backupLegacy()`。
 
-### 3.3 `lib/project.js`
+## 5. 注入与预算
 
-- `resolveProject(cwd)` → `{ key, name, root } | undefined`：从 cwd 向上找最近含 `.git`（目录或文件）的祖先；
-  找不到时以 cwd 为 root；`key` 为解析后的绝对路径（尽量 realpath），`name` 为 basename。带进程内缓存。
-- `projectFromSession(session)` → 同步读 `session.header.cwd` 并调用 `resolveProject`（无 cwd 返回 undefined）。
-- `isSubagentSession(session)` → `session.header.origin === 'subagent' || (session.header.delegationDepth ?? 0) > 0`。
+- `systemPrompt.section('dsh-memory:policy', order 950)`：静态策略；暂停时返回空串。
+- `systemPrompt.context('dsh-memory:index', order 90, required, interpolate:false)`：每步按 agent 的
+  当前工作目录组装：
+  - `### Global memory`：`maxTopicsInPrompt` / `maxIndexChars`；
+  - `### Project memory — <name>`：`projectMaxTopicsInPrompt` / `projectMaxIndexChars`；
+  - 超出部分提示用 `memory` 工具检索。
+- 子代理会话不注入、不自动判定；单会话 opt-out 时跳过。
+- 项目记忆只在 `project.key === 当前工作目录` 时注入；全局记忆所有项目可见。
+- 记忆文本是背景数据，不是指令；当前用户消息与系统提示始终优先。
 
-### 3.4 `lib/retrieval.js`
+## 6. 判定与触发
 
-纯函数，不触碰磁盘：
+触发：静默 `quietSeconds`（默认 30s）、新会话边界、会话销毁、插件启动补判、手动
+`memory extract`/`/memory extract`/设置页 Extract now。队列并发 1；门限 `minNewChars`、
+`minIntervalSeconds`、`maxRunsPerHour`；水位线在 drain 前二次校验。
 
-- `normalizeTitle(text)`, `contentHash(text)`, `similarity(a, b)`（拉丁词 + CJK 字符 bigram 的 Jaccard）。
-- `matchesQuery(record, query)` 与 `scoreRecord(record, query)`：标题/摘要/tag/正文命中加权。
-- `searchRecords(records, { query, scope, kind, status, projectKey, limit, offset })` → `{ items, total }`。
-- `sortForPrompt(records)`：pinned → importance → updatedAt 降序。
-- `renderIndex(records, { maxTopics, maxChars })` → `{ text, included, omitted }`（Markdown 行，
-  每行 `- id · kind · scope · YYYY-MM-DD · summary`）。
-- `renderJudgeIndex(records, maxChars)` → 紧凑文本（`id | kind | scope | title | summary`）。
-- `counts(records)` → `{ total, active, archived, global, project, pinned }`。
+判定使用当前会话模型路由（设置可覆盖 `judgeProvider/judgeModel`），严格 JSON create/update，
+自动永不 delete；落库前密钥脱敏 + 敏感类别策略。`created/updated/skipped/rejected` 写入活动。
 
-### 3.5 `lib/store.js`
+## 7. 工具与命令
 
-`class MemoryStore`：
+`memory` 工具：`search | get | list | save | update | forget | extract`。项目作用域来自调用 agent 的
+当前工作目录；`save` 默认 global，`scope:"project"` 需当前项目；列表/搜索只返回全局 + 当前项目。
 
-- `constructor({ stateStore, now?, logger? })`；`async load()`；`get settings()`；`get state()`；`snapshot()`。
-- `list(options)` / `get(id)` / `search(query, options)`。
-- `create(input, { origin })` → `{ action: 'created' | 'merged', record }`；`update(id, patch, { origin })`；
-  `remove(id, { origin })`；`clear()` → `{ count }`；`setPinned(id, pinned)`。
-- `applyOperations(operations, { origin, source })` → `{ created, updated, skipped, rejected }`（判定结果落库）。
-- `setSettings(patch)`（校验范围，非法值抛 `invalid-request`）；`setSessionOptOut(sessionId, value)`;
-  `isSessionOptOut(sessionId)`。
-- `getWatermark(sessionId)` / `setWatermark(sessionId, { seq, chars })`。
-- `indexForPrompt({ projectKey, maxTopics, maxChars })` → `{ text, included, omitted }`；
-  `indexForJudge(maxChars)` → `string`。
-- `stats()`；`listActivity(limit)`；`recordActivity(entry)`。
-- `onChange(listener)` → dispose；`async flush()`（等待挂起的写盘）。
-- 写盘策略：内存状态同步更新后异步串行 `save()`；失败只记日志并保留 `dirty`，下次重试。
-- `MEMORY.md` 与 `audit.jsonl` 在每次变更后异步刷新/追加。
+`/memory` 命令：`status | list | search | extract | pause | resume | forget | pin | unpin | reset | help`。
 
-### 3.6 `lib/transcript.js`
+## 8. HTTP API（仅 Web profile）
 
-- `snapshotSession(session)` → 同步快照：
-  `{ sessionId, title, cwd, projectKey?, isSubagent, route: {provider, model} | undefined, events, header }`
-  （`events` 来自 `session.snapshotEvents()`，try/catch；`route` 来自 `session.requestHeader()`）。
-- `buildExtractionInput(snapshot, { watermarkSeq, maxInputChars })` →
-  `{ transcript, compactionSummary, humanMessages, humanChars, nextSeq, totalEvents, toolNames }`
-  - 只取 `user/message` 且 `source.kind === 'user'` 的人类消息 + `assistant/message` 的 text 块；
-  - 工具只记录名称集合；`compaction/summary` 取最近 2 条文本作为背景；
-  - 从最新往回截断到 `maxInputChars`，前缀注明省略数量；`nextSeq` 为快照内最大 seq。
+前缀 `/api/dsh-memory`，同源认证；响应 envelope `{ok:true,value}` / `{ok:false,error:{code,message}}`，
+`Cache-Control: no-store`。
 
-### 3.7 `lib/judge.js`
+| 路由 | 说明 |
+|---|---|
+| `GET /state?sessionId=` | `layout`/`memoryRoot`、settings/stats/所有记忆摘要（含 `projectKey`、`memoryDir`、`file`）/known projects/activity/live sessions |
+| `GET /memory?id=&projectKey=` | 单条完整正文；`projectKey` 用于跨项目定位 |
+| `POST /action` | `create/update/delete/pin/unpin/clear/pause/resume/setSessionOptOut/extractNow/export/setSettings` |
 
-- `resolveJudgeRoute(ctx, snapshot)` → `{ provider, model } | undefined`：
-  `settings.judgeProvider/judgeModel`（两者同时非空）→ `snapshot.route` → `ctx.get('agentDefaultModel')?.currentSelection()`。
-- `buildJudgePrompt({ settings, snapshot, indexText, extraction })` → `{ system, user }`。
-- `parseJudgeOutput(text)` → `{ operations, skipped }`；容忍 ```json 围栏，严格校验对象/数组；失败抛 `judge-failed`。
-- `validateOperations(operations, { allowSensitive })` → `{ accepted, rejected }`：白名单字段、枚举、
-  长度、数量上限（create ≤5、update ≤10、delete 不来自自动判定）、脱敏后文本。
-- `async runJudge({ ctx, store, snapshot, extraction, signal, settings })` →
-  `{ status: 'ok'|'skipped'|'error', created, updated, skipped, reason?, model? }`
-  - 用 `ctx.llm.stream({ provider, model, system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], temperature: 0, signal, maxTokens })`；
-  - 累积 `text-delta`；`finish.reason.kind` 必须为 `stop`，否则抛错；
-  - 解析 + 校验 + `store.applyOperations`。
+- `create` 的 `scope:"project"` 接受显式 `project:{key,name}` 或当前 live session 的项目；否则
+  `invalid-request`。
+- `update/delete/pin/unpin` 支持 `projectKey` 帮助定位；未提供时回退当前 session 项目再全局查找。
+- `clear` 需 `confirm:true`；无 `projectKey` 时清全局 + 已知项目；带 `projectKey` 只清该项目。
+- `export` 结构：`{exportedAt,version,layout:"markdown-topic-files",settings,globalMemories,projects:[{key,name,memoryDir,memories}]}`。
+- 设置页状态请求会只读加载 known projects（不创建目录、不注入），使非 live 项目也能查看/编辑。
 
-### 3.8 `lib/extractor.js`
+## 9. 监控、并发与一致性
 
-`class Extractor`：
+- live session 的 `agent/created`、`working-directory/change` → `acquireProject`：加载并 `fs.watch`
+  项目目录；`agent/disposed`/`session/disposed` 释放引用，最后一个引用释放时停止 watcher。
+- watcher 事件去抖 300 ms，触发 `forceReload` 全量重读 + 重建索引；`MEMORY.md` 自身写入不会形成回路。
+- 兜底：注入前每 10s 最多一次全量重读，防止文件系统 mtime 粒度或 watcher 不可用导致漏检。
+- 文件是权威：外部编辑/新增/删除在刷新后生效；手工改 `MEMORY.md` 会被重建覆盖。
+- 原子写 + 同进程串行；多 Host 同时写同一目录时 **last-writer-wins**，无跨进程锁；audit 记录本进程
+  操作，冲突后以磁盘最新内容为准。
+- 已知项目读取路径只读；只有写操作创建 `.dsh/dsh-memory`。
 
-- `constructor({ ctx, store, judge, logger, now?, setTimeout?, clearTimeout? })`。
-- `async start()`：扫描 `ctx.agents.list()`，为「root、idle、有未判定内容」的会话安排静默判定。
-- `onStatus({ agent, status })`：`idle` 且 root → 去抖安排；`running` → 取消计时器。
-- `onAgentDisposed({ agent })`、`onSessionCreated(session)`（触发其它空闲会话的 boundary 判定）、
-  `onSessionDisposed(session)`（同步快照后入队）。
-- `extractNow(agentOrSessionId, { trigger })` → `Promise<result>`：手动判定（不受静默/间隔限制，仍受门控与总开关约束）。
-- `dispose()`：清理计时器、abort 在途请求、等待队列收敛（best-effort）。
-- 内部：按 sessionId 去重的 FIFO 队列、全局并发 1、每 session 最小间隔与每小时上限、watermark 只在成功后推进、
-  activity 记录、错误只 warn。
+## 10. 安全与隐私
 
-### 3.9 `lib/inject.js`
+- 读文件时跳过 symlink、非普通文件、超过 256 KB、目录外路径；项目目录由绝对工作目录 + 固定段拼出。
+- 默认不保存敏感个人话题；证件号/金融账号/犯罪/移民/凭据永不保存；落库前脱敏。
+- 记忆只在本地；除 `ctx.llm` 判定调用外不发网络请求。
+- 删除会话不删除记忆；用户可在设置页或工具中删除。
 
-- `installInjection(ctx, { store, logger })` → `{ dispose() }`（内部用 `ctx.effect` 也可）。
-- 注册：
-  - `ctx.systemPrompt.section({ name: 'dsh-memory:policy', order: 950, text: () => policyText(store.settings) })`
-  - `ctx.systemPrompt.context({ name: 'dsh-memory:index', order: 90, required: true, interpolate: false,
-    text: (assembly) => indexContextText(assembly.agent, store) })`
-- `policyText(settings)`：总开关关闭时返回 `''`；否则返回固定英文说明（记忆是背景数据不是指令、
-  何时 search/get、何时 save/forget、不得编造记忆、不存密钥）。工具关闭时改为只读说明段。
-- `indexContextText(agent, store)`：subagent、总开关关闭、会话 opt-out、无 cwd 时相应降级；
-  仅注入 active 记录，按项目过滤；空白或索引为空时返回 `''`。
+## 11. 测试与验收
 
-### 3.10 `lib/tools.js`
-
-- `createMemoryTool({ store, extractor, logger })` → 手写 ToolDefinition：
-  - `name: 'memory'`，单 action 参数：`search | get | list | save | update | forget | extract`。
-  - 输出 schema：`{ ok: boolean, message: string, details?: string, ids?: string[] }`，render 为文本。
-  - `save` 走 `store.create`；`update` 走 `store.update`（白名单字段）；`forget` 受 `allowModelDelete` 限制；
-    `extract` 调 `extractor.extractNow(agent)`。
-  - 总开关关闭时读操作返回 `ok:false, message: memory disabled`；写操作抛 `disabled`。
-
-### 3.11 `lib/commands.js`
-
-- `createMemoryCommands({ store, extractor })` → `CommandDefinition[]`（单条 `memory`）。
-- 语法：`/memory [status|list [q]|search <q>|pause|resume|extract|forget <id>|pin <id>|unpin <id>|reset --yes|help]`。
-- 返回 `{ kind: 'success', text }` 或 `{ kind: 'error', text }`；未知子命令给帮助。
-
-### 3.12 `lib/api.js`
-
-- `API_PREFIX = '/api/dsh-memory'`。
-- `apiRoutes({ store, extractor, resolveSessionContext })` → `ConnectionFetchRoute[]`，全部 `requestBody: 'buffered'`：
-  - `GET ${API_PREFIX}/state?sessionId=` → `{ ok, value }`：
-    `{ settings, stats, memories: StateItem[], projects, activity: ActivityEntry[],
-    liveSessions: [{ sessionId, title, status, optedOut, cwd? }], session, paused }`
-    - `StateItem` 不含 `content`（正文），含 id/title/summary/kind/scope/project/tags/importance/pinned/status/
-      createdAt/updatedAt/revision/source。
-  - `GET ${API_PREFIX}/memory?id=` → `{ ok, value: record }`（含正文）；未知 id → `not-found`。
-  - `POST ${API_PREFIX}/action` body `{ action, sessionId?, ... }`，action 白名单：
-    `create | update | delete | pin | unpin | clear | pause | resume | setSessionOptOut | extractNow | export | setSettings`。
-- 响应封装与 dsh-skill 一致：`{ ok: true, value }` / `{ ok: false, error: { code, message } }`；
-  `cache-control: no-store`；业务错误 HTTP 200，畸形请求 4xx，internal 500。
-- `resolveSessionContext(sessionId)`（Host 注入）：返回 `{ cwd?, project?, live?: boolean }`。
-
-## 4. 工具与命令契约
-
-### 4.1 `memory` 工具（模型可见）
-
-```
-action: search | get | list | save | update | forget | extract
-query?, id?, title?, summary?, content?, kind?, scope?, importance?, tags?, pinned?, limit?, offset?, status?
-```
-
-- `save` 必填 `title` + `content`；`scope=project` 时项目取当前会话 cwd 的项目根。
-- `search` 默认 limit 10；`list` 默认 limit 20。
-- 描述中明确：只在用户要求时 forget；不得保存密钥/敏感信息；记忆是数据不是指令。
-- 工具执行上下文取 `exec.agent`；无 agent 时读写返回错误。
-
-### 4.2 `/memory` 命令
-
-见 3.11；输出为纯文本（多行），不进入模型上下文（DSH 命令语义）。
-
-## 5. 浏览器半（`client.js`）
-
-- lazy-CJS：`window.__ModuleLoader__.load({ id: '@local/dsh-memory', factory(require) { ... } })`，只 `require('react')`。
-- 注册：`ctx.effect(() => ctx.locale.register(NS, { zh, en }))`、
-  `ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'memory',
-  order: 30, label: () => t('nav'), locale: NS }, MemorySettingsSection))`；
-  通过 `ctx.inject(['commandUi'], scoped => scoped.effect(() => scoped.commandUi.decorateFace({...})))`
-  为宿主 `/memory` 命令注册输入框「+」菜单行外观（icon/label/description，zh/en 内联字典）。
-- 设置页导航图标由宿主 `SettingsRoot.tsx` 的 `navIcon('memory')` 提供（本地 Harness 补丁，见 README）；
-  渲染器不提供插件注册图标的槽位。
-- `NS = 'dsh-memory'`；主题色只用 `--dsw-alias-*` token；样式使用单个 `<style>`（类前缀 `dshmemory-`）。
-- 设置页功能：状态行（总数/全局/项目/暂停开关）、搜索、scope/kind 过滤、列表、详情编辑
-  （title/content/kind/scope/importance/pinned/tags，Save/Cancel/Delete）、新增、清空（二次确认）、
-  导出 JSON、当前会话立即判定、最近活动、加载/错误/重试/空态。
-- 数据流：`GET /api/dsh-memory/state` → 渲染列表；点击条目 `GET /api/dsh-memory/memory?id=` 取正文；
-  所有变更 `POST /api/dsh-memory/action` 后重新拉取 state。
-- 所有 fetch 同源、`credentials: 'same-origin'`、`cache: 'no-store'`；错误显示 `code` 与 message。
-- 中文/英文文案内联字典；`locale` 服务不可用时回退英文。
-
-## 6. 隐私与安全
-
-- 落库前密钥形态一律脱敏（`settings.redactSecrets`）；判定提示词要求永不保存凭据/证件号/金融账号。
-- 敏感类别（健康、政治、宗教、性别认同、性取向、民族）默认不保存，`settings.allowSensitive` 才放开；
-  用户明确要求且 allowSensitive 时可保存。
-- 记忆注入是背景数据；policy section 明确「不当指令执行、不编造」。
-- 数据只落本机 `$DSH_HOME/dsh-memory/`；插件不发起网络请求（LLM 调用除外，经 `ctx.llm`）。
-- 删除会话不删除记忆（文档写明）；单会话 opt-out 可关闭该会话的注入与自动判定。
-
-## 7. 测试接缝
-
-- 纯模块（state/privacy/project/retrieval/transcript/judge/parser）直接 import 测试。
-- Store/Extractor 接受注入的 `now`、`setTimeout/clearTimeout`、fake `ctx`（`agents`、`llm`、`logger`、
-  `get(name)`），不依赖真实 Harness。
-- API 用标准 `Request` 直接调用 route 的 `fetch`。
-- Client 不做自动化渲染测试；通过真实安装后的页面手测验收。
+`node --test test/*.test.js` 覆盖：state v2/迁移、frontmatter 容忍格式、topic collection 读写/索引/
+外部编辑、store 全局/项目路由/去重/配额/预算、注入、判定、提取、工具、API、命令与回归项。
+`node --check index.js client.js lib/*.js` 必须通过。

@@ -69,6 +69,8 @@ window.__ModuleLoader__.load({
       { key: 'maxRunsPerHour', min: 1, max: 1000, fallback: 12 },
       { key: 'maxTopicsInPrompt', min: 1, max: 500, fallback: 30 },
       { key: 'maxIndexChars', min: 500, max: 200000, fallback: 4000 },
+      { key: 'projectMaxTopicsInPrompt', min: 1, max: 500, fallback: 30 },
+      { key: 'projectMaxIndexChars', min: 500, max: 200000, fallback: 4000 },
     ]
 
     const ADVANCED_STRINGS = ['judgeProvider', 'judgeModel']
@@ -82,6 +84,8 @@ window.__ModuleLoader__.load({
       maxRunsPerHour: 12,
       maxTopicsInPrompt: 30,
       maxIndexChars: 4000,
+      projectMaxTopicsInPrompt: 30,
+      projectMaxIndexChars: 4000,
       projectsEnabled: true,
       redactSecrets: true,
       toolEnabled: true,
@@ -96,7 +100,7 @@ window.__ModuleLoader__.load({
       'common.loading': 'Loading…', 'common.retry': 'Retry',
       'common.cancel': 'Cancel', 'common.dismiss': 'Dismiss', 'common.working': 'Working…',
       'common.refresh': 'Refresh', 'common.all': 'All', 'common.unknown': 'Unknown',
-      'page.title': 'Memory', 'page.intro': 'Long-term memory the assistant saves while you chat. Review, edit, pause, or export it here.', 'status.line': '{total} total · {active} active · {archived} archived · {global} global · {project} project · {pinned} pinned · {projects} projects',
+      'page.title': 'Memory', 'page.intro': 'Long-term memory the assistant saves while you chat. Review, edit, pause, or export it here.', 'page.storage': 'Global: {global} · Project: {project}', 'status.line': '{total} total · {active} active · {archived} archived · {global} global · {project} project · {pinned} pinned · {projects} projects',
       'status.lastUpdated': 'Last updated {time}', 'status.never': 'never', 'paused.badge': 'Paused',
       'paused.hint': 'Memory is paused: automatic extraction, recall, and the memory tool are off until you resume.', 'action.pause': 'Pause memory', 'action.resume': 'Resume memory',
       'notice.paused': 'Memory paused.', 'notice.resumed': 'Memory resumed.', 'toolbar.search': 'Search memories',
@@ -148,11 +152,16 @@ window.__ModuleLoader__.load({
       'advanced.quietSeconds': 'Quiet period before judging (seconds, 3–600)', 'advanced.quietSeconds.hint': 'How long a conversation must be idle after a turn.', 'advanced.minNewChars': 'Minimum new characters (0–100000)',
       'advanced.minNewChars.hint': 'New human text required since the previous run.', 'advanced.minIntervalSeconds': 'Minimum gap per session (seconds, 0–86400)', 'advanced.minIntervalSeconds.hint': 'Two automatic runs in one session never start closer than this.',
       'advanced.maxRunsPerHour': 'Maximum automatic runs per hour (1–1000)', 'advanced.maxRunsPerHour.hint': 'Per-session cap on automatic extraction.', 'advanced.maxTopicsInPrompt': 'Index topics injected (1–500)',
-      'advanced.maxTopicsInPrompt.hint': 'Upper bound on memory lines placed in the prompt.', 'advanced.maxIndexChars': 'Index size budget (characters, 500–200000)', 'advanced.maxIndexChars.hint': 'Character budget for the injected memory index.',
+      'advanced.maxTopicsInPrompt.hint': 'Upper bound on memory lines placed in the prompt.', 'advanced.maxIndexChars': 'Index size budget (characters, 500–200000)', 'advanced.maxIndexChars.hint': 'Character budget for the injected global index.',
+      'advanced.projectMaxTopicsInPrompt': 'Project index topics injected (1–500)',
+      'advanced.projectMaxTopicsInPrompt.hint': 'Upper bound on project memory lines placed in the prompt.',
+      'advanced.projectMaxIndexChars': 'Project index size budget (characters, 500–200000)',
+      'advanced.projectMaxIndexChars.hint': 'Character budget for the injected project memory index.',
+      'editor.memoryDir': 'Memory directory', 'editor.file': 'Topic file',
       'advanced.judgeProvider': 'Judge provider', 'advanced.judgeProvider.hint': 'Empty inherits the current session route.', 'advanced.judgeModel': 'Judge model',
       'advanced.judgeModel.hint': 'Empty inherits the current session route. Set both fields to override.', 'data.title': 'Backup & cleanup', 'data.desc': 'Export a snapshot, or erase the memory library.',
       'export.title': 'Export JSON', 'export.desc': 'Download every memory with its full body, plus settings, as a JSON file.', 'export.button': 'Export JSON',
-      'export.working': 'Exporting…', 'clear.title': 'Clear all memories', 'clear.desc': 'Permanently delete every memory record. Settings, activity, and session opt-outs are kept.',
+      'export.working': 'Exporting…', 'clear.title': 'Clear all memories', 'clear.desc': 'Permanently delete every memory topic in the global library and every known project. Settings, activity, and session opt-outs are kept.',
       'clear.label': 'Type DELETE to confirm', 'clear.placeholder': 'DELETE', 'clear.button': 'Clear all memories',
       'clear.busy': 'Clearing…', 'error.load': 'Could not load memory: {message}', 'error.action': 'The action failed: {message}',
       'error.export': 'Could not export memory: {message}', 'error.payload': 'The server returned an unexpected response.', 'error.withCode': '{kind} — {message}',
@@ -167,7 +176,7 @@ window.__ModuleLoader__.load({
       'common.loading': '加载中…', 'common.retry': '重试',
       'common.cancel': '取消', 'common.dismiss': '关闭', 'common.working': '处理中…',
       'common.refresh': '刷新', 'common.all': '全部', 'common.unknown': '未知',
-      'page.title': '记忆', 'page.intro': '助手在对话中自动保存的长期记忆。可在此查看、编辑、暂停或导出。', 'status.line': '共 {total} 条 · 活跃 {active} 条 · 归档 {archived} 条 · 全局 {global} 条 · 项目 {project} 条 · 置顶 {pinned} 条 · {projects} 个项目',
+      'page.title': '记忆', 'page.intro': '助手在对话中自动保存的长期记忆。可在此查看、编辑、暂停或导出。', 'page.storage': '全局：{global} · 项目：{project}', 'status.line': '共 {total} 条 · 活跃 {active} 条 · 归档 {archived} 条 · 全局 {global} 条 · 项目 {project} 条 · 置顶 {pinned} 条 · {projects} 个项目',
       'status.lastUpdated': '最近更新 {time}', 'status.never': '从未', 'paused.badge': '已暂停',
       'paused.hint': '记忆已暂停：自动判定、召回和记忆工具都会停用，恢复后重新生效。', 'action.pause': '暂停记忆', 'action.resume': '恢复记忆',
       'notice.paused': '已暂停记忆。', 'notice.resumed': '已恢复记忆。', 'toolbar.search': '搜索记忆',
@@ -219,11 +228,16 @@ window.__ModuleLoader__.load({
       'advanced.quietSeconds': '判定前静默时长（秒，3–600）', 'advanced.quietSeconds.hint': '一轮对话结束后需静默多久才触发判定。', 'advanced.minNewChars': '最少新增字符数（0–100000）',
       'advanced.minNewChars.hint': '自上次运行以来需要新增的人类文本长度。', 'advanced.minIntervalSeconds': '同一会话最小间隔（秒，0–86400）', 'advanced.minIntervalSeconds.hint': '同一会话内两次自动运行的最近间隔。',
       'advanced.maxRunsPerHour': '每小时最多自动运行次数（1–1000）', 'advanced.maxRunsPerHour.hint': '每个会话的自动提取次数上限。', 'advanced.maxTopicsInPrompt': '注入索引的最大条数（1–500）',
-      'advanced.maxTopicsInPrompt.hint': '提示词中最多放入多少条记忆。', 'advanced.maxIndexChars': '索引字符预算（字符，500–200000）', 'advanced.maxIndexChars.hint': '注入的记忆索引允许占用的最大字符数。',
+      'advanced.maxTopicsInPrompt.hint': '提示词中最多放入多少条记忆。', 'advanced.maxIndexChars': '索引字符预算（字符，500–200000）', 'advanced.maxIndexChars.hint': '注入的全局记忆索引允许占用的最大字符数。',
+      'advanced.projectMaxTopicsInPrompt': '项目索引注入条数（1–500）',
+      'advanced.projectMaxTopicsInPrompt.hint': '提示词中最多放入多少条项目记忆。',
+      'advanced.projectMaxIndexChars': '项目索引字符预算（字符，500–200000）',
+      'advanced.projectMaxIndexChars.hint': '注入的项目记忆索引允许占用的最大字符数。',
+      'editor.memoryDir': '记忆目录', 'editor.file': '主题文件',
       'advanced.judgeProvider': '判定服务商', 'advanced.judgeProvider.hint': '留空则沿用当前会话的路由。', 'advanced.judgeModel': '判定模型',
       'advanced.judgeModel.hint': '留空则沿用当前会话的路由；两个字段同时填写才会覆盖。', 'data.title': '备份与清理', 'data.desc': '导出快照，或清空整个记忆库。',
       'export.title': '导出 JSON', 'export.desc': '将全部记忆（含正文）和设置下载为一个 JSON 文件。', 'export.button': '导出 JSON',
-      'export.working': '正在导出…', 'clear.title': '清空所有记忆', 'clear.desc': '永久删除全部记忆记录。设置、活动和会话退出标记会保留。',
+      'export.working': '正在导出…', 'clear.title': '清空所有记忆', 'clear.desc': '永久删除全局记忆以及所有已知项目中的全部记忆主题。设置、活动和会话退出标记会保留。',
       'clear.label': '输入 DELETE 以确认', 'clear.placeholder': 'DELETE', 'clear.button': '清空所有记忆',
       'clear.busy': '正在清空…', 'error.load': '无法加载记忆：{message}', 'error.action': '操作失败：{message}',
       'error.export': '无法导出记忆：{message}', 'error.payload': '服务器返回了意外的响应。', 'error.withCode': '{kind} — {message}',
@@ -400,8 +414,12 @@ window.__ModuleLoader__.load({
       return requestJson(withSession(API_STATE, sessionId))
     }
 
-    function fetchMemory(id) {
-      return requestJson(API_MEMORY + '?id=' + encodeURIComponent(id))
+    function fetchMemory(id, projectKey) {
+      let url = API_MEMORY + '?id=' + encodeURIComponent(id)
+      if (typeof projectKey === 'string' && projectKey !== '') {
+        url += '&projectKey=' + encodeURIComponent(projectKey)
+      }
+      return requestJson(url)
     }
 
     function postAction(action, payload) {
@@ -440,7 +458,16 @@ window.__ModuleLoader__.load({
       if (!isObject(raw)) return null
       const key = asString(raw.key).trim()
       if (key === '') return null
-      return { key, name: asString(raw.name).trim() || key, count: Math.max(0, Math.round(asNumber(raw.count, 0))) }
+      const counts = isObject(raw.counts) ? raw.counts : {}
+      return {
+        key,
+        name: asString(raw.name).trim() || key,
+        memoryDir: asString(raw.memoryDir),
+        loaded: raw.loaded === true,
+        watching: raw.watching === true,
+        error: asString(raw.error),
+        count: Math.max(0, Math.round(asNumber(counts.active ?? raw.count, 0))),
+      }
     }
 
     function normalizeSource(raw) {
@@ -462,7 +489,11 @@ window.__ModuleLoader__.load({
       const project = scope === 'project' ? normalizeProject(raw.project) : null
       return {
         id, title: asString(raw.title), summary: asString(raw.summary), content: asString(raw.content),
-        kind, scope, project, tags: asStringArray(raw.tags),
+        kind, scope, project,
+        projectKey: asString(raw.projectKey) || (project === null ? '' : project.key),
+        memoryDir: asString(raw.memoryDir) || (project === null ? '' : project.memoryDir),
+        file: asString(raw.file),
+        tags: asStringArray(raw.tags),
         importance: clampInteger(raw.importance, 3, 1, 5), pinned: raw.pinned === true, status,
         createdAt: asString(raw.createdAt), updatedAt: asString(raw.updatedAt),
         revision: Math.max(1, Math.round(asNumber(raw.revision, 1))),
@@ -556,6 +587,7 @@ window.__ModuleLoader__.load({
         }
       }
       return {
+        memoryRoot: asString(value.memoryRoot),
         settings: normalizeSettings(value.settings), stats: normalizeStats(value.stats),
         memories, projects, activity, liveSessions, session: normalizeSession(value.session),
       }
@@ -635,7 +667,7 @@ window.__ModuleLoader__.load({
 
     const STYLE_TEXT = `
 .dshmemory-section { display: flex; flex-direction: column; gap: 16px; width: 100%; max-width: 820px; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 20px; } .dshmemory-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.dshmemory-headText { display: flex; flex-direction: column; gap: 2px; min-width: 0; } .dshmemory-title { margin: 0; font-size: 18px; line-height: 26px; font-weight: 600; }
+.dshmemory-headText { display: flex; flex-direction: column; gap: 2px; min-width: 0; } .dshmemory-path { margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; font-family: var(--dsh-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace); } .dshmemory-title { margin: 0; font-size: 18px; line-height: 26px; font-weight: 600; }
 .dshmemory-intro { margin: 0; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; } .dshmemory-stats { margin: 2px 0 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-caption); overflow-wrap: anywhere; }
 .dshmemory-headActions { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; } .dshmemory-btn { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 30px; padding: 0 12px; border: none; border-radius: var(--dsw-radius-md); background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 18px; white-space: nowrap; cursor: pointer; }
 .dshmemory-btn:disabled { opacity: 0.45; cursor: default; } .dshmemory-btnPrimary { background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); }
@@ -1012,7 +1044,7 @@ window.__ModuleLoader__.load({
         setLoadState('loading')
         setLoadError('')
         try {
-          const value = await fetchMemory(item.id)
+          const value = await fetchMemory(item.id, item.projectKey)
           if (ticket !== seqRef.current) return
           const next = normalizeMemory(value)
           if (next === null) throw requestError('request-failed', tRef.current('error.payload'))
@@ -1024,7 +1056,7 @@ window.__ModuleLoader__.load({
           setLoadError(tRef.current('editor.loadError', { message: failureText(cause, tRef.current) }))
           setLoadState('error')
         }
-      }, [item.id])
+      }, [item.id, item.projectKey])
 
       useEffect(() => {
         void load()
@@ -1053,6 +1085,7 @@ window.__ModuleLoader__.load({
         const payload = {
           id: item.id, title, summary: form.summary.trim(), content, kind: form.kind, scope: form.scope,
           importance: Number(form.importance), tags: parseTags(form.tags), pinned: form.pinned === true, status: form.status,
+          projectKey: item.projectKey || (item.project === null ? '' : item.project.key),
         }
         if (project !== undefined) payload.project = { key: project.key, name: project.name }
         setFormError('')
@@ -1093,6 +1126,8 @@ window.__ModuleLoader__.load({
         : (source.sessionId !== '' ? shortId(source.sessionId) : t('editor.sourceUnknown'))
       const metaRows = [
         { key: 'id', label: t('editor.id'), value: item.id, mono: true },
+        { key: 'memoryDir', label: t('editor.memoryDir'), value: item.memoryDir || '—', mono: true },
+        ...(item.file === '' ? [] : [{ key: 'file', label: t('editor.file'), value: item.file, mono: true }]),
         { key: 'revision', label: t('editor.revision'), value: String(item.revision) },
         { key: 'source', label: t('editor.source'), value: enumLabel('origin.', source.origin, MEMORY_ORIGINS, t) },
         { key: 'session', label: t('editor.session'), value: sessionText },
@@ -1588,7 +1623,7 @@ window.__ModuleLoader__.load({
       const togglePin = async item => {
         const next = item.pinned !== true
         const title = item.title || t('memory.untitled')
-        const result = await runMutation('pin:' + item.id, next ? 'pin' : 'unpin', { id: item.id })
+        const result = await runMutation('pin:' + item.id, next ? 'pin' : 'unpin', { id: item.id, projectKey: item.projectKey || (item.project === null ? '' : item.project.key) })
         if (result.ok) notify('success', t(next ? 'notice.pinned' : 'notice.unpinned', { title }))
       }
       const saveMemory = async payload => {
@@ -1597,7 +1632,7 @@ window.__ModuleLoader__.load({
         return result
       }
       const deleteMemory = async item => {
-        const result = await runMutation('delete:' + item.id, 'delete', { id: item.id })
+        const result = await runMutation('delete:' + item.id, 'delete', { id: item.id, projectKey: item.projectKey || (item.project === null ? '' : item.project.key) })
         if (result.ok) {
           setExpandedId(current => (current === item.id ? '' : current))
           notify('success', t('notice.deleted', { title: item.title || t('memory.untitled') }))
@@ -1756,6 +1791,11 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dshmemory-headText' },
             h('h2', { className: 'dshmemory-title' }, t('page.title')),
             h('p', { className: 'dshmemory-intro' }, t('page.intro')),
+            data === null || data.memoryRoot === '' ? null : h('p', { className: 'dshmemory-path' },
+              t('page.storage', {
+                global: data.memoryRoot,
+                project: data.session.project === null ? '—' : (data.session.project.memoryDir || data.session.project.key),
+              })),
             statsText === '' ? null : h('p', { className: 'dshmemory-stats' },
               statsText, lastUpdated === '' ? '' : ' · ' + t('status.lastUpdated', { time: lastUpdated }))),
           h('div', { className: 'dshmemory-headActions' },

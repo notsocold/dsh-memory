@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apiRoutes, API_PREFIX } from '../lib/api.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { cleanup, makeHome, makeStore } from './helpers.js'
 
 /**
@@ -65,6 +68,9 @@ test('api: state returns settings, summaries, activity and live sessions', async
     assert.equal(body.value.liveSessions.length, 1)
     assert.deepEqual(body.value.settings.enabled, true)
     assert.equal(typeof body.value.stats.active, 'number')
+    assert.equal(typeof body.value.settings.projectMaxTopicsInPrompt, 'number')
+    assert.ok(Array.isArray(body.value.projects))
+    assert.ok(body.value.projects.every(project => typeof project.memoryDir === 'string'))
 
     const anonymous = await call(routes[0])
     assert.equal(anonymous.body.value.session.optedOut, false)
@@ -138,16 +144,23 @@ test('api: project-scoped create requires a project and accepts an explicit one'
     assert.equal(missing.body.ok, false)
     assert.equal(missing.body.error.code, 'invalid-request')
 
-    const explicit = await action(route, {
-      action: 'create',
-      title: 'Project topic',
-      content: 'Body',
-      kind: 'project',
-      scope: 'project',
-      project: { key: '/repos/explicit', name: 'explicit' },
-    })
-    assert.equal(explicit.body.ok, true)
-    assert.equal(store.memories[0].project.key, '/repos/explicit')
+    const workspace = await mkdtemp(join(tmpdir(), 'dsh-memory-api-ws-'))
+    try {
+      const explicit = await action(route, {
+        action: 'create',
+        title: 'Project topic',
+        content: 'Body',
+        kind: 'project',
+        scope: 'project',
+        project: { key: workspace, name: 'explicit' },
+      })
+      assert.equal(explicit.body.ok, true)
+      assert.equal(store.memories[0].project.key, workspace)
+      const files = await (await import('node:fs/promises')).readdir(join(workspace, '.dsh', 'dsh-memory'))
+      assert.ok(files.some(name => name.endsWith('.md')))
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
   } finally {
     await cleanup(home)
   }
@@ -198,8 +211,10 @@ test('api: pause/resume, settings, opt-out, clear and export', async () => {
 
     const exported = await action(route, { action: 'export' })
     assert.equal(exported.body.ok, true)
-    assert.equal(exported.body.value.memories.length, 1)
-    assert.equal(exported.body.value.memories[0].content, 'Body kept until clear.')
+    assert.equal(exported.body.value.layout, 'markdown-topic-files')
+    assert.equal(exported.body.value.globalMemories.length, 1)
+    assert.equal(exported.body.value.globalMemories[0].content, 'Body kept until clear.')
+    assert.ok(Array.isArray(exported.body.value.projects))
 
     const refused = await action(route, { action: 'clear' })
     assert.equal(refused.body.error.code, 'invalid-request')

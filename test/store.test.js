@@ -1,336 +1,351 @@
+/**
+ * Unit tests for lib/store.js — Markdown topic collections, global/project
+ * routing, migration, monitoring and merged prompt indexes.
+ */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemoryStore, renderMirror, MAX_ACTIVE_RECORDS } from '../lib/store.js'
+import { MemoryStore, MAX_ACTIVE_RECORDS, PROJECT_MEMORY_DIR } from '../lib/store.js'
 import { StateStore } from '../lib/state.js'
-import { cleanup, makeHome, makeStore, silentLogger } from './helpers.js'
+import { cleanup, makeHome, makeStore, silentLogger, waitFor } from './helpers.js'
 
 /**
- * @param {MemoryStore} store - store under test.
- * @param {Record<string, any>} [input] - create input overrides.
- * @returns {Record<string, any>} created record.
+ * @returns {Promise<string>} a temporary workspace directory.
  */
-function createRecord(store, input = {}) {
-  const result = store.create({
-    title: 'User prefers pnpm',
-    content: 'The user always uses pnpm for Node.js projects.',
-    kind: 'preference',
-    scope: 'global',
-    importance: 4,
-    tags: ['pnpm', 'tooling'],
-    ...input,
-  }, { origin: 'manual', source: { sessionId: 'sess-1', sessionTitle: 'Setup chat' } })
-  return result.record
+async function makeWorkspace() {
+  return mkdtemp(join(tmpdir(), 'dsh-memory-ws-'))
 }
 
-test('store: create fills defaults and renders into the prompt index', async () => {
+/**
+ * @param {MemoryStore} store - hub.
+ * @param {string} workspace - project key.
+ * @param {Record<string, any>} [overrides] - create input.
+ * @returns {Record<string, any>} created record.
+ */
+function createProjectRecord(store, workspace, overrides = {}) {
+  return store.create({
+    title: 'Project fact',
+    content: 'The staging deployment target is tatooine.',
+    kind: 'project',
+    scope: 'project',
+    project: { key: workspace, name: 'ws' },
+    ...overrides,
+  }, { origin: 'manual', source: { sessionId: 'sess-1' } }).record
+}
+
+test('store: global records live in the harness directory as Markdown topics', async () => {
   const home = await makeHome()
   try {
     const store = await makeStore(home)
-    const record = createRecord(store)
-    assert.match(record.id, /^m_[0-9a-f]{8}$/)
-    assert.equal(record.kind, 'preference')
-    assert.equal(record.scope, 'global')
-    assert.equal(record.importance, 4)
-    assert.deepEqual(record.tags, ['pnpm', 'tooling'])
-    assert.equal(record.status, 'active')
-    assert.equal(record.revision, 1)
-    assert.equal(record.source.origin, 'manual')
-    assert.equal(record.source.sessionId, 'sess-1')
+    const record = store.create({
+      title: 'User prefers pnpm',
+      content: 'The user always uses pnpm for Node.js projects.',
+      kind: 'preference',
+      scope: 'global',
+      importance: 4,
+      tags: ['pnpm'],
+    }, { origin: 'manual', source: { sessionId: 's-1' } }).record
+    await store.flush()
 
-    const index = store.indexForPrompt({})
-    assert.equal(index.included, 1)
-    assert.equal(index.omitted, 0)
-    assert.match(index.text, new RegExp(record.id))
-    assert.match(index.text, /preference/)
-    assert.match(index.text, /The user always uses pnpm for Node\.js projects\./)
+    const root = join(home, 'dsh-memory')
+    const files = await readdir(root)
+    const topicFile = files.find(name => name.startsWith(record.id))
+    assert.ok(topicFile !== undefined && topicFile.endsWith('.md'))
+    const body = await readFile(join(root, topicFile), 'utf8')
+    assert.match(body, /^---\n/u)
+    assert.match(body, /title: "User prefers pnpm"/u)
+    assert.match(body, /kind: "preference"/u)
+    assert.match(body, /modified: "/u)
+    assert.match(body, /The user always uses pnpm/u)
+    assert.ok(files.includes('MEMORY.md'))
+    assert.ok(files.includes('state.json'))
+    assert.ok(files.includes('audit.jsonl'))
+    const index = await readFile(join(root, 'MEMORY.md'), 'utf8')
+    assert.match(index, /\[User prefers pnpm\]/u)
+    assert.match(index, /m_/u)
+
+    assert.equal(store.memories.length, 1)
+    assert.equal(store.state.memories, undefined)
+    assert.equal(store.list({ status: 'all' }).total, 1)
   } finally {
     await cleanup(home)
   }
 })
 
-test('store: create merges duplicate titles, duplicate bodies and near-identical topics', async () => {
+test('store: project records live inside the workspace and are injected only there', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
+  const other = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    const first = createRecord(store)
+    const record = createProjectRecord(store, workspace)
+    await store.flush()
 
-    const titleTwin = store.create({
-      title: '  USER prefers   pnpm!! ',
-      content: 'Different body text about the package manager choice.',
-      kind: 'preference',
-      scope: 'global',
-    }, { origin: 'auto' })
-    assert.equal(titleTwin.action, 'merged')
-    assert.equal(titleTwin.record.id, first.id)
-    assert.equal(titleTwin.record.revision, 2)
-    assert.equal(store.memories.length, 1)
+    const projectDir = join(workspace, '.dsh', 'dsh-memory')
+    const files = await readdir(projectDir)
+    assert.ok(files.some(name => name.startsWith(record.id)))
+    assert.ok(files.includes('MEMORY.md'))
+    assert.equal(store.state.projects[workspace].name, 'ws')
+    assert.equal(store.state.projects[workspace].memoryDir, projectDir)
 
-    const bodyTwin = store.create({
-      title: 'Node package manager',
-      content: 'Different body text about the package manager choice.',
-      kind: 'preference',
-      scope: 'global',
-    }, { origin: 'auto' })
-    assert.equal(bodyTwin.action, 'merged')
-    assert.equal(store.memories.length, 1)
+    const thisProject = store.indexForPrompt({ projectKey: workspace })
+    assert.match(thisProject.text, /Project memory/u)
+    assert.match(thisProject.text, /staging deployment target/u)
+    const otherProject = store.indexForPrompt({ projectKey: other })
+    assert.doesNotMatch(otherProject.text, /staging deployment target/u)
+    assert.equal(otherProject.included, 0)
 
-    // A genuinely different topic must not be swallowed by the similarity guard.
-    const distinct = store.create({
-      title: 'Sourdough feeding schedule',
-      content: 'Feed the starter every morning with equal parts flour and water.',
-      kind: 'reference',
-      scope: 'global',
-    }, { origin: 'auto' })
-    assert.equal(distinct.action, 'created')
-    assert.equal(store.memories.length, 2)
-    assert.ok(bodyTwin.record.revision >= 3)
+    // Global memory appears in both.
+    store.create({ title: 'Global', content: 'Global preference.', kind: 'preference' })
+    assert.match(store.indexForPrompt({ projectKey: workspace }).text, /Global memory/u)
+    assert.match(store.indexForPrompt({ projectKey: other }).text, /Global memory/u)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
+    await rm(other, { recursive: true, force: true })
   }
 })
 
-test('store: the same title in a different scope or project is a separate topic', async () => {
+test('store: duplicate detection is scoped per collection', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
+  const other = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    createRecord(store)
-    const projectA = store.create({
-      title: 'User prefers pnpm',
-      content: 'Project A pins pnpm because of a workspace constraint.',
+    const first = store.create({
+      title: 'Deploy target',
+      content: 'Staging is tatooine.',
       kind: 'project',
-      scope: 'project',
-      project: { key: '/repos/a', name: 'a' },
-    })
-    assert.equal(projectA.action, 'created')
-    const projectB = store.create({
-      title: 'User prefers pnpm',
-      content: 'Project B pins pnpm because of a workspace constraint.',
+      scope: 'global',
+    }).record
+    const merged = store.create({
+      title: 'Deploy target',
+      content: 'Staging is tatooine (confirmed).',
       kind: 'project',
-      scope: 'project',
-      project: { key: '/repos/b', name: 'b' },
+      scope: 'global',
     })
-    assert.equal(projectB.action, 'created')
+    assert.equal(merged.action, 'merged')
+    assert.equal(merged.record.id, first.id)
+    assert.equal(merged.record.revision, 2)
+
+    const projectA = createProjectRecord(store, workspace, { title: 'Deploy target' })
+    const projectB = createProjectRecord(store, other, { title: 'Deploy target' })
+    assert.notEqual(projectA.id, projectB.id)
     assert.equal(store.memories.length, 3)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
+    await rm(other, { recursive: true, force: true })
   }
 })
 
-test('store: update revises fields, validates input and redacts secrets', async () => {
+test('store: update, pin, remove and clear route through the owning collection', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    const record = createRecord(store)
-    const updated = store.update(record.id, {
-      title: 'User prefers pnpm everywhere',
-      content: 'Confirmed for all repos. token=sk-abcdefghijklmnopqrstuvwxyz012345',
-      importance: 5,
-      tags: ['pnpm', 'pnpm', 'node', 'a', 'b', 'c', 'd', 'e', 'f', 'g'],
-    }, { origin: 'manual' })
-    assert.equal(updated.record.revision, 2)
-    assert.equal(updated.record.importance, 5)
-    assert.match(updated.record.content, /\[REDACTED\]/)
-    assert.doesNotMatch(updated.record.content, /sk-abcdefghijklmnopqrstuvwxyz/)
-    assert.equal(updated.record.tags.length, 8)
-    assert.equal(updated.record.tags[0], 'pnpm')
+    const global = store.create({ title: 'Global', content: 'Global body.' }).record
+    const project = createProjectRecord(store, workspace)
 
-    assert.throws(() => store.update('m_00000000', { title: 'x' }), error => error.code === 'not-found')
-    assert.throws(() => store.update(record.id, {}), error => error.code === 'invalid-request')
-    assert.throws(() => store.update(record.id, { scope: 'project' }), error => error.code === 'invalid-request')
-    assert.throws(() => store.update(record.id, { kind: 'nope' }), error => error.code === 'invalid-request')
-  } finally {
-    await cleanup(home)
-  }
-})
+    store.update(project.id, { content: 'Updated project body.' }, { projectKey: workspace })
+    assert.equal(store.get(project.id, { projectKey: workspace }).content, 'Updated project body.')
+    store.setPinned(project.id, true, { projectKey: workspace })
+    assert.equal(store.get(project.id, { projectKey: workspace }).pinned, true)
 
-test('store: remove, clear and counters', async () => {
-  const home = await makeHome()
-  try {
-    const store = await makeStore(home)
-    const first = createRecord(store)
-    const second = store.create({ title: 'Deploy target', content: 'Staging host is tatooine.', kind: 'project' })
-    assert.equal(store.memories.length, 2)
-    assert.throws(() => store.remove('m_ffffffff'), error => error.code === 'not-found')
-    const removed = store.remove(first.id)
-    assert.equal(removed.action, 'deleted')
+    const pinFile = await readFile(join(workspace, '.dsh', 'dsh-memory', store.toListItem(store.get(project.id)).file), 'utf8')
+    assert.match(pinFile, /pinned: true/u)
+
+    store.remove(global.id)
+    assert.equal(store.get(global.id), undefined)
     assert.equal(store.memories.length, 1)
-    assert.equal(store.state.stats.deleted, 1)
-    assert.deepEqual(store.clear(), { count: 1 })
+
+    store.clear()
     assert.equal(store.memories.length, 0)
-    assert.equal(store.state.stats.deleted, 2)
-    const stats = store.stats()
-    assert.equal(stats.total, 0)
-    assert.equal(stats.paused, false)
-    assert.equal(stats.stateStats.deleted, 2)
-    void second
+    const projectFiles = (await readdir(join(workspace, '.dsh', 'dsh-memory')))
+      .filter(name => name.endsWith('.md') && name !== 'MEMORY.md')
+    assert.equal(projectFiles.length, 0)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
   }
 })
 
-test('store: pinned topics sort first and project filtering keeps scopes apart', async () => {
+test('store: topic files are authoritative; generated index edits are ignored', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    const global = createRecord(store)
-    const projectA = store.create({
-      title: 'Repo A uses vitest',
-      content: 'Repository A runs its suite with vitest.',
-      kind: 'project',
-      scope: 'project',
-      project: { key: '/repos/a', name: 'a' },
-    }).record
-    store.create({
-      title: 'Repo B uses jest',
-      content: 'Repository B runs its suite with jest.',
-      kind: 'project',
-      scope: 'project',
-      project: { key: '/repos/b', name: 'b' },
-    })
-    store.setPinned(global.id, true)
-    const index = store.indexForPrompt({ projectKey: '/repos/a' })
-    assert.equal(index.included, 2)
-    assert.ok(index.text.indexOf(global.id) < index.text.indexOf(projectA.id))
-    assert.doesNotMatch(index.text, /Repo B/)
-    const globalOnly = store.indexForPrompt({})
-    assert.equal(globalOnly.included, 1)
-    assert.match(globalOnly.text, new RegExp(global.id))
+    const record = createProjectRecord(store, workspace)
+    const dir = join(workspace, '.dsh', 'dsh-memory')
+    const filename = store.toListItem(record).file
+    const topicPath = join(dir, filename)
 
-    store.setSettings({ projectsEnabled: false })
-    const withoutProjects = store.indexForPrompt({ projectKey: '/repos/a' })
-    assert.equal(withoutProjects.included, 1)
-    assert.match(withoutProjects.text, new RegExp(global.id))
+    // Edit the topic file externally.
+    const original = await readFile(topicPath, 'utf8')
+    await writeFile(topicPath, original.split('tatooine').join('coruscant'), 'utf8')
+    store.lastRefreshCheck = 0
+    store.refreshIfStale()
+    assert.match(store.get(record.id, { projectKey: workspace }).content, /coruscant/u)
+
+    // Replacing MEMORY.md with junk does not delete the record.
+    await writeFile(join(dir, 'MEMORY.md'), 'garbage\n', 'utf8')
+    store.lastRefreshCheck = 0
+    store.refreshIfStale()
+    assert.equal(store.get(record.id, { projectKey: workspace }).title, 'Project fact')
+    const regenerated = await readFile(join(dir, 'MEMORY.md'), 'utf8')
+    assert.match(regenerated, /Project fact/u)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
   }
 })
 
-test('store: index budgets truncate and report omissions', async () => {
+test('store: a watched project reloads on external file changes', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    const subjects = ['banana peel', 'quartz ledger', 'violet antenna', 'marble kettle', 'zephyr harbor']
-    for (let index = 0; index < 5; index += 1) {
-      store.create({
-        title: subjects[index],
-        content: `Fact: the ${subjects[index]} card belongs to ${subjects[(index + 2) % 5]}.`,
-        kind: 'reference',
-        importance: index + 1,
-      })
+    store.acquireProject({ key: workspace, name: 'ws' })
+    const record = createProjectRecord(store, workspace)
+    const dir = join(workspace, '.dsh', 'dsh-memory')
+    const topicPath = join(dir, store.toListItem(record).file)
+    const original = await readFile(topicPath, 'utf8')
+    await writeFile(topicPath, original.split('tatooine').join('mustafar'), 'utf8')
+    await waitFor(() => store.get(record.id, { projectKey: workspace })?.content.includes('mustafar'), { timeoutMs: 5000 })
+  } finally {
+    await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('store: v1 memory.json migrates into global and project Markdown files', async () => {
+  const home = await makeHome()
+  const workspace = await makeWorkspace()
+  try {
+    const root = join(home, 'dsh-memory')
+    await mkdir(root, { recursive: true })
+    const legacy = {
+      version: 1,
+      settings: { quietSeconds: 45, enabled: true },
+      memories: [
+        {
+          id: 'm_11111111', title: 'Global legacy', summary: 'g', content: 'Global body.',
+          kind: 'preference', scope: 'global', project: null, tags: [], importance: 3,
+          pinned: false, status: 'active', createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z', revision: 1, source: { origin: 'tool' },
+        },
+        {
+          id: 'm_22222222', title: 'Project legacy', summary: 'p', content: 'Project body.',
+          kind: 'project', scope: 'project', project: { key: workspace, name: 'ws' }, tags: [],
+          importance: 4, pinned: false, status: 'active', createdAt: '2026-01-02T00:00:00.000Z',
+          updatedAt: '2026-01-02T00:00:00.000Z', revision: 2, source: { origin: 'auto' },
+        },
+      ],
+      watermarks: { 'sess-1': { seq: 5, at: '2026-01-01T00:00:00.000Z', chars: 20 } },
+      sessionOptOut: {},
+      activity: [],
+      stats: { created: 2, updated: 1, deleted: 0, runs: 1, errors: 0 },
     }
-    const one = store.indexForPrompt({ maxTopics: 1 })
-    assert.equal(one.included, 1)
-    assert.equal(one.omitted, 4)
-    const tiny = store.indexForPrompt({ maxChars: 60 })
-    assert.ok(tiny.text.length <= 60)
-    assert.ok(tiny.omitted >= 4)
+    await writeFile(join(root, 'memory.json'), JSON.stringify(legacy), 'utf8')
+
+    const store = new MemoryStore({ stateStore: new StateStore({ home }), logger: silentLogger() })
+    await store.load()
+    await store.flush()
+
+    const rootFiles = await readdir(root)
+    assert.ok(rootFiles.some(name => name.startsWith('memory.json.migrated-')))
+    assert.ok(rootFiles.includes('state.json'))
+    assert.ok(rootFiles.some(name => name.startsWith('m_11111111')))
+    const projectFiles = await readdir(join(workspace, '.dsh', 'dsh-memory'))
+    assert.ok(projectFiles.some(name => name.startsWith('m_22222222')))
+    assert.equal(store.state.version, 2)
+    assert.equal(store.state.stats.migrated, 2)
+    assert.equal(store.state.watermarks['sess-1'].seq, 5)
+    assert.equal(store.state.settings.quietSeconds, 45)
+    assert.equal(store.state.projects[workspace].name, 'ws')
+    assert.equal(store.indexForPrompt({ projectKey: workspace }).included, 2)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
   }
 })
 
-test('store: settings validation and pause/resume', async () => {
+test('store: known projects load read-only and clearing removes both scopes', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    store.setSettings({ quietSeconds: 45, autoExtract: false })
-    assert.equal(store.settings.quietSeconds, 45)
-    assert.equal(store.settings.autoExtract, false)
-    assert.throws(() => store.setSettings({ nope: true }), error => error.code === 'invalid-request')
-    assert.throws(() => store.setSettings({ quietSeconds: 1 }), error => error.code === 'invalid-request')
-    assert.throws(() => store.setSettings({ autoExtract: 'yes' }), error => error.code === 'invalid-request')
-    assert.throws(() => store.setSettings({ judgeProvider: 5 }), error => error.code === 'invalid-request')
-    store.setSettings({ enabled: false })
-    assert.equal(store.stats().paused, true)
-    store.setSettings({ enabled: true })
-    assert.equal(store.stats().paused, false)
+    store.create({ title: 'Global', content: 'Global body.' })
+    createProjectRecord(store, workspace)
+    await store.flush()
+
+    const reloaded = new MemoryStore({ stateStore: new StateStore({ home }), logger: silentLogger() })
+    await reloaded.load()
+    assert.equal(reloaded.memories.length, 1)
+    const known = reloaded.loadKnownProjects()
+    assert.equal(known.length, 1)
+    assert.equal(known[0].key, workspace)
+    assert.equal(reloaded.memories.length, 2)
+    const listed = reloaded.list({ status: 'all' }).items
+    assert.ok(listed.some(record => record.scope === 'project'))
+    const projectItem = listed.find(record => record.scope === 'project')
+    assert.equal(reloaded.toListItem(projectItem).memoryDir, join(workspace, PROJECT_MEMORY_DIR))
+
+    assert.equal(reloaded.clear().count, 2)
+    assert.equal(reloaded.memories.length, 0)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
   }
 })
 
-test('store: session opt-out, watermarks and hourly run counting', async () => {
+test('store: independent global and project prompt budgets', async () => {
   const home = await makeHome()
+  const workspace = await makeWorkspace()
   try {
     const store = await makeStore(home)
-    assert.equal(store.isSessionOptOut('sess-1'), false)
-    store.setSessionOptOut('sess-1', true)
-    assert.equal(store.isSessionOptOut('sess-1'), true)
-    store.setSessionOptOut('sess-1', false)
-    assert.equal(store.isSessionOptOut('sess-1'), false)
-
-    assert.equal(store.getWatermark('sess-1'), undefined)
-    store.setWatermark('sess-1', { seq: 7, chars: 120 })
-    const watermark = store.getWatermark('sess-1')
-    assert.equal(watermark.seq, 7)
-    assert.equal(watermark.chars, 120)
-
-    store.recordActivity({ sessionId: 'sess-1', trigger: 'quiet', status: 'ok', created: 1 })
-    store.recordActivity({ sessionId: 'sess-1', trigger: 'manual', status: 'error', reason: 'boom' })
-    assert.equal(store.runsInLastHour('sess-1'), 2)
-    assert.equal(store.state.stats.runs, 2)
-    assert.equal(store.state.stats.errors, 1)
-    const activity = store.listActivity(1)
-    assert.equal(activity.length, 1)
-    assert.equal(activity[0].status, 'error')
+    const globalTopics = [
+      'The office espresso machine is cleaned every Friday afternoon by the facilities team.',
+      'Quarterly budget reviews happen on the second Tuesday of each month at ten in the morning.',
+      'The backup generator in building seven is tested during the first week of every quarter.',
+      'Customer interviews are transcribed with the vendor approved by the legal department.',
+    ]
+    for (const topic of globalTopics) {
+      store.create({ title: topic.slice(0, 40), content: topic, kind: 'reference' })
+    }
+    const projectTopics = [
+      'Saffron routers route analytics traffic through the dedicated staging gateway.',
+      'Tundra proxies terminate TLS certificates before requests reach application pods.',
+      'Cobalt ledgers retain seven years of audit entries in cold object storage.',
+      'Willow beacons synchronize deployment clocks across the multi-region cluster.',
+    ]
+    for (const topic of projectTopics) {
+      createProjectRecord(store, workspace, { title: topic.slice(0, 40), content: topic })
+    }
+    store.setSettings({ maxTopicsInPrompt: 2, projectMaxTopicsInPrompt: 3 })
+    const index = store.indexForPrompt({ projectKey: workspace })
+    assert.equal(index.included, 5)
+    assert.match(index.text, /2 more global topics/u)
+    assert.match(index.text, /1 more project topics/u)
   } finally {
     await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
   }
 })
 
-test('store: applyOperations applies creates/updates and rejects deletes', async () => {
+test('store: quota archives low-value records inside one collection', async () => {
   const home = await makeHome()
   try {
     const store = await makeStore(home)
-    const created = store.applyOperations([
-      { op: 'create', title: 'Topic one', content: 'The first durable fact.', kind: 'reference' },
-      { op: 'create', title: 'Topic two', content: 'The second durable fact.', kind: 'decision' },
-      { op: 'delete', id: 'm_00000000' },
-      { op: 'create', title: '', content: 'bad' },
-      { op: 'nope' },
-    ], { origin: 'auto', source: { sessionId: 's' } })
-    assert.equal(created.created.length, 2)
-    assert.equal(created.rejected.length, 3)
-    assert.equal(created.rejected[0].op, 'delete')
-    const update = store.applyOperations([
-      { op: 'update', id: created.created[0].id, patch: { summary: 'Updated summary.', importance: 5 } },
-    ], { origin: 'auto' })
-    assert.equal(update.updated.length, 1)
-    assert.equal(update.updated[0].summary, 'Updated summary.')
-    assert.equal(update.updated[0].importance, 5)
-  } finally {
-    await cleanup(home)
-  }
-})
-
-test('store: change listeners observe mutations and can be disposed', async () => {
-  const home = await makeHome()
-  try {
-    const store = await makeStore(home)
-    let events = 0
-    const dispose = store.onChange(() => { events += 1 })
-    createRecord(store)
-    assert.ok(events >= 1)
-    const before = events
-    dispose()
-    store.create({ title: 'Another topic', content: 'Another durable fact.' })
-    assert.equal(events, before)
-  } finally {
-    await cleanup(home)
-  }
-})
-
-test('store: quota archives low-value records without deleting pinned ones', async () => {
-  const home = await makeHome()
-  try {
-    const store = await makeStore(home)
+    const collection = store.globalCollection
     const now = new Date().toISOString()
-    for (let index = 0; index < MAX_ACTIVE_RECORDS + 5; index += 1) {
-      store.memories.push({
+    for (let index = 0; index < MAX_ACTIVE_RECORDS + 3; index += 1) {
+      collection.records.push({
         id: `m_${index.toString(16).padStart(8, '0')}`,
-        title: `Bulk topic ${index}`,
+        title: `Bulk ${index}`,
         summary: 'bulk',
         content: `Bulk content ${index}`,
         kind: 'reference',
@@ -346,88 +361,68 @@ test('store: quota archives low-value records without deleting pinned ones', asy
         source: { origin: 'manual' },
       })
     }
-    const archived = store.enforceQuota()
-    assert.equal(archived, 5)
-    assert.equal(store.memories.filter(record => record.status === 'active').length, MAX_ACTIVE_RECORDS)
-    assert.equal(store.memories[0].status, 'active')
+    const archived = store.enforceQuota(collection)
+    assert.equal(archived, 3)
+    assert.equal(collection.records.filter(record => record.status === 'active').length, MAX_ACTIVE_RECORDS)
+    assert.equal(collection.records[0].status, 'active')
   } finally {
     await cleanup(home)
   }
 })
 
-test('store: persists records, settings, watermarks and the markdown mirror', async () => {
+test('store: change listeners and activity/watermark state', async () => {
   const home = await makeHome()
   try {
     const store = await makeStore(home)
-    createRecord(store)
-    store.setSettings({ autoExtract: false })
-    store.setSessionOptOut('sess-2', true)
-    store.setWatermark('sess-1', { seq: 3, chars: 42 })
-    await store.flush()
-
-    const reloaded = new MemoryStore({ stateStore: new StateStore({ home }), logger: silentLogger() })
-    await reloaded.load()
-    assert.equal(reloaded.memories.length, 1)
-    assert.equal(reloaded.memories[0].title, 'User prefers pnpm')
-    assert.equal(reloaded.settings.autoExtract, false)
-    assert.equal(reloaded.isSessionOptOut('sess-2'), true)
-    assert.equal(reloaded.getWatermark('sess-1').seq, 3)
-
-    const root = join(home, 'dsh-memory')
-    const mirror = await readFile(join(root, 'MEMORY.md'), 'utf8')
-    assert.match(mirror, /# dsh-memory/)
-    assert.match(mirror, /User prefers pnpm/)
-    const audit = await readFile(join(root, 'audit.jsonl'), 'utf8')
-    assert.ok(audit.trim().split('\n').length >= 1)
-    const raw = JSON.parse(await readFile(join(root, 'memory.json'), 'utf8'))
-    assert.equal(raw.version, 1)
-    assert.equal(raw.memories.length, 1)
+    let events = 0
+    const dispose = store.onChange(() => { events += 1 })
+    store.create({ title: 'Observed', content: 'Observed body.' })
+    assert.ok(events >= 1)
+    store.recordActivity({ trigger: 'manual', status: 'ok', created: 1, projectKey: '/tmp/ws' })
+    assert.equal(store.state.activity[0].projectKey, '/tmp/ws')
+    store.setWatermark('sess-1', { seq: 4, chars: 12 })
+    assert.equal(store.getWatermark('sess-1').seq, 4)
+    store.setSessionOptOut('sess-1', true)
+    assert.equal(store.isSessionOptOut('sess-1'), true)
+    const before = events
+    dispose()
+    store.create({ title: 'After dispose', content: 'No listener.' })
+    assert.equal(events, before)
   } finally {
     await cleanup(home)
   }
 })
 
-test('store: renderMirror groups global and project topics', () => {
-  const state = {
-    memories: [
-      {
-        id: 'm_11111111',
-        title: 'Global preference',
-        summary: 'summary',
-        content: 'body',
-        kind: 'preference',
-        scope: 'global',
-        project: null,
-        tags: [],
-        importance: 3,
-        pinned: false,
-        status: 'active',
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-        revision: 1,
-        source: { origin: 'manual' },
-      },
-      {
-        id: 'm_22222222',
-        title: 'Project fact',
-        summary: 'summary',
-        content: 'body',
-        kind: 'project',
-        scope: 'project',
-        project: { key: '/repos/a', name: 'alpha' },
-        tags: ['vitest'],
-        importance: 2,
-        pinned: true,
-        status: 'active',
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-02T00:00:00.000Z',
-        revision: 2,
-        source: { origin: 'auto' },
-      },
-    ],
+test('store: loaded projects never leak into another project index', async () => {
+  const home = await makeHome()
+  const workspaceA = await makeWorkspace()
+  const workspaceB = await makeWorkspace()
+  try {
+    const store = await makeStore(home)
+    createProjectRecord(store, workspaceA, {
+      title: 'Alpha rollout',
+      content: 'Saffron routers terminate analytics traffic in the alpha cluster.',
+    })
+    createProjectRecord(store, workspaceB, {
+      title: 'Beta rollout',
+      content: 'Tundra proxies terminate analytics traffic in the beta cluster.',
+    })
+    // Both collections are loaded (as the settings page does for known projects).
+    store.loadKnownProjects()
+    assert.ok(store.projects.size >= 2)
+    const alpha = store.indexForPrompt({ projectKey: workspaceA })
+    const beta = store.indexForPrompt({ projectKey: workspaceB })
+    assert.match(alpha.text, /Saffron routers/u)
+    assert.doesNotMatch(alpha.text, /Tundra proxies/u)
+    assert.match(beta.text, /Tundra proxies/u)
+    assert.doesNotMatch(beta.text, /Saffron routers/u)
+    const betaRecord = store.list({ projectKey: workspaceB, status: 'all' }).items
+      .find(record => record.scope === 'project')
+    assert.ok(betaRecord !== undefined)
+    assert.equal(store.get(betaRecord.id, { projectKey: workspaceA }), undefined)
+  } finally {
+    await cleanup(home)
+    await rm(workspaceA, { recursive: true, force: true })
+    await rm(workspaceB, { recursive: true, force: true })
   }
-  const mirror = renderMirror(state)
-  assert.match(mirror, /## Global/)
-  assert.match(mirror, /## Project: alpha/)
-  assert.match(mirror, /Project fact/)
 })

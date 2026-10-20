@@ -203,8 +203,9 @@ describe('snapshotSession', () => {
     assert.equal(snapshot.title, 'Latest')
     assert.deepEqual(snapshot.route, { provider: 'provider-a', model: 'model-b' })
     assert.equal(snapshot.cwd, cwd)
-    assert.equal(snapshot.projectKey, await realpath(repo))
-    assert.equal(snapshot.projectName, 'snapshot-repo')
+    // Project memory now follows the session working directory (not the git root).
+    assert.equal(snapshot.projectKey, cwd)
+    assert.equal(snapshot.projectName, 'nested')
     assert.equal(snapshot.isSubagent, false)
     assert.equal(snapshot.createdAt, 1700000000000)
     assert.deepEqual(snapshot.header, session.header)

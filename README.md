@@ -6,7 +6,8 @@
 - **自动召回**：后续会话把记忆索引注入提示词，模型可按需读取正文；全局 + 项目两级作用域；
 - **可管理**：Settings → Memory 管理页支持搜索、查看、编辑、删除、固定、暂停/恢复、清空、导出；
 - **模型可操作**：`memory` 工具（search/get/list/save/update/forget/extract）与 `/memory` 命令；
-- **本地优先**：数据只落本机 `$DSH_HOME/dsh-memory/`；无构建、无 npm 依赖、无 TypeScript。
+- **本地优先 / 文件可读**：全局记忆在 `$DSH_HOME/dsh-memory/`，项目记忆在 `{workspace}/.dsh/dsh-memory/`；
+  主题是 Markdown 文件（可进 git、可手工编辑），`MEMORY.md` 是生成索引；无构建、无 npm 依赖、无 TypeScript。
 
 > 设计说明见 [docs/DESIGN.md](docs/DESIGN.md)，内部接口契约见 [CONTRACT.md](CONTRACT.md)。
 
@@ -31,8 +32,9 @@
 
 - 固定策略段（记忆是背景数据、不是指令；何时检索/保存/删除；不得编造记忆）。
 - 动态记忆索引（每步按当前项目刷新）：只注入 `id · kind · scope · 日期 · 摘要`，正文用工具按需读取；
-  预算默认 30 条 / 4000 字符，超出提示模型用 `memory` 工具检索。
-- 项目隔离：`global` 记忆在所有会话可见；`project` 记忆只在对应 git 项目根/工作目录的会话可见。
+  全局与项目各自独立预算（默认各 30 条 / 4000 字符），超出提示模型用 `memory` 工具检索。
+- 项目隔离：`global` 记忆在所有会话可见；`project` 记忆只在**会话工作目录**对应的
+  `{workspace}/.dsh/dsh-memory/` 中读写/注入。工作目录变更会切换项目作用域。
 - 子代理会话（subagent）不注入、不自动判定；单会话可 opt-out。
 
 ### 3. 管理页（Settings → Memory）
@@ -42,9 +44,9 @@
   并声明自由输入提示，`/memory <子命令>` 可被正常接收。
 
 - 统计（总数/活跃/归档/全局/项目/固定/最近更新）与全局暂停/恢复；
-- 搜索 + scope/kind/status/project 过滤；
-- 记忆列表与详情编辑器（title/summary/content/kind/scope/importance/pinned/tags/status）；
-- 新增、两步确认删除、导出 JSON、清空（需输入 `DELETE` 确认）；
+- 搜索 + scope/kind/status/project 过滤；known projects 可在无 live 会话时只读/编辑；
+- 记忆列表与详情编辑器（title/summary/content/kind/scope/importance/pinned/tags/status，含主题文件路径）；
+- 新增、两步确认删除、导出 JSON、清空（需输入 `DELETE` 确认；会清全局 + 已知项目）；
 - 选择本 Host 的 live 会话：立即判定（Extract now）、单会话 opt-out；
 - 高级设置（静默秒数、增量阈值、注入预算、项目记忆开关、工具开关、模型删除开关、敏感内容开关、判定模型覆盖等）；
 - 最近 20 次判定活动（触发、状态、created/updated/skipped、原因）。
@@ -89,11 +91,25 @@ pnpm dsh plugin --profile web remove @local/dsh-memory
 ## 数据与隐私
 
 ```
-$DSH_HOME/dsh-memory/memory.json   # 唯一事实源（原子写；损坏时备份 .broken-<ts>）
-$DSH_HOME/dsh-memory/audit.jsonl   # 追加审计（create/update/delete/archive/settings/clear）
-$DSH_HOME/dsh-memory/MEMORY.md     # 只读 Markdown 镜像，便于查看/备份
+$DSH_HOME/dsh-memory/
+├── MEMORY.md                  # 全局索引（生成，可重建）
+├── m_<id>-<slug>.md           # 全局记忆主题（权威事实源，Markdown）
+├── state.json                 # 设置/水位线/活动/known projects（无 memories）
+├── audit.jsonl                # 追加审计
+└── memory.json.migrated-<ts>  # v1 迁移备份
+
+{workspace}/.dsh/dsh-memory/   # 项目级（随项目进 git，不自动改 .gitignore）
+├── MEMORY.md
+└── m_<id>-<slug>.md
 ```
 
+- 主题 frontmatter 记录 id/title/summary/kind/importance/tags/pinned/status/created/modified/revision/
+  origin/session/model；正文是 Markdown。`MEMORY.md` 和 prompt 索引都是生成物，手工改索引会被覆盖。
+- 项目作用域 = 会话**工作目录**（不向上找 `.git`）；同一仓库不同子目录彼此隔离。
+- live 会话会加载并 `fs.watch` 自己的项目目录；外部编辑/新增/删除在 300ms 去抖后重载；设置页 known
+  projects 读取时懒加载、只读展示（不注入、不创建空目录）。
+- 文件写入同目录临时文件 + rename 原子替换；mtime 不可靠时有 10s 兜底全量重读。
+- 项目目录存在时插件只写 `MEMORY.md` 与主题文件；**不会**自动创建 `.gitignore`/README。
 - `$DSH_HOME` 解析：显式参数 → `DSH_HOME` 环境变量 → `~/.dsh`。
 - 落库前强制脱敏密钥形态（`sk-*`、GitHub token、AWS key、Bearer、PEM 私钥、`password=` 等）。
 - 默认不保存敏感个人话题（健康、政治、宗教、性取向、性别认同、民族）；证件号/金融账号/犯罪/移民/
@@ -103,7 +119,7 @@ $DSH_HOME/dsh-memory/MEMORY.md     # 只读 Markdown 镜像，便于查看/备�
 
 ## 配置
 
-所有运行期设置保存在 `memory.json` 的 `settings` 中，可在设置页「Advanced settings」修改：
+所有运行期设置保存在 `state.json` 的 `settings` 中，可在设置页「Advanced settings」修改：
 
 | 设置 | 默认 | 说明 |
 |---|---|---|
@@ -113,8 +129,10 @@ $DSH_HOME/dsh-memory/MEMORY.md     # 只读 Markdown 镜像，便于查看/备�
 | `minNewChars` | 120 | 自上次判定以来新增人类字符下限 |
 | `minIntervalSeconds` | 60 | 同一会话两次自动判定最小间隔 |
 | `maxRunsPerHour` | 12 | 同一会话每小时自动判定上限 |
-| `maxTopicsInPrompt` | 30 | 注入索引最大条数 |
-| `maxIndexChars` | 4000 | 注入索引最大字符数 |
+| `maxTopicsInPrompt` | 30 | 全局注入索引最大条数 |
+| `maxIndexChars` | 4000 | 全局注入索引最大字符数 |
+| `projectMaxTopicsInPrompt` | 30 | 项目注入索引最大条数（独立预算） |
+| `projectMaxIndexChars` | 4000 | 项目注入索引最大字符数（独立预算） |
 | `projectsEnabled` | true | 是否注入项目级记忆 |
 | `toolEnabled` | true | 是否向模型暴露 `memory` 工具 |
 | `allowModelDelete` | true | 模型可否在用户明确要求时 forget |
@@ -155,8 +173,11 @@ DSH 客户端包，始终只需 `require('react')`。
 
 ```
 index.js                     Host 入口：装配 store/injector/extractor/tools/commands/routes
-lib/state.js                 $DSH_HOME 解析、JSON 状态、原子写、损坏备份、设置/记录归一化
-lib/store.js                 记忆 CRUD、去重合并、配额归档、索引渲染、水位线、活动/审计、MEMORY.md
+lib/state.js                 $DSH_HOME 解析、state.json v2、迁移归一化、原子写、损坏备份、审计
+lib/frontmatter.js           主题 Markdown frontmatter 解析/生成、MEMORY.md 索引渲染（容忍手工文件）
+lib/topiccollection.js       单目录主题集合：读写、扫描、外部刷新、watch、原子写、索引重建
+lib/project.js               工作目录身份、有效 cwd、子代理判定
+lib/store.js                 global/project 路由、去重/配额、迁移、索引预算、known projects、水位线、活动
 lib/retrieval.js             搜索评分、排序、项目过滤、索引预算、统计
 lib/transcript.js            会话事件 → 判定输入（人类/助手消息、工具名、compaction、截断）
 lib/judge.js                 判定提示词、ctx.llm.stream 调用、严格 JSON 解析/校验/脱敏、模型路由
@@ -168,15 +189,15 @@ lib/api.js                   /api/dsh-memory/{state,memory,action}
 client.js                    Settings → Memory 管理页（lazy-CJS，仅 require('react')）
 package.json / cordis.patch.yml / locale/{en,zh}.json / icon.svg
 docs/DESIGN.md / CONTRACT.md / README.md
-test/                        node:test 单元测试（236 个）
+test/                        node:test 单元测试（14 个文件、199 项）
 ```
 
 ## 开发与测试
 
 ```bash
 cd /home/zhaodan/work/NodeJsProjects/dsh-memory
-npm run check     # node --check index.js client.js lib/*.js
-npm test          # node --test test/*.test.js
+pnpm run check    # node --check index.js client.js lib/*.js
+pnpm test         # node --test test/*.test.js
 ```
 
 测试全部 hermetic：临时 `DSH_HOME`、fake LLM stream、fake Cordis ctx、可注入定时器/时间；
@@ -197,16 +218,20 @@ npm test          # node --test test/*.test.js
 - **召回**：全新 headless 进程（`--patch` 注入同一插件）中，模型先 `memory search pnpm`，随后仅依据
   记忆正确回答「Node.js 项目使用 pnpm」，并引用记忆 id。
 - **Web 端**：另起验证实例（3099，测试后已关闭）确认：index 的 `__DSH_BOOT__` 含
-  `@local/dsh-memory` 客户端条目；`GET /plugins/??@local/dsh-memory/client.js` 返回 112 KB
-  bundle（含 `__ModuleLoader__.load`）；认证后的
+  `@local/dsh-memory` 客户端条目；`GET /plugins/??@local/dsh-memory/client.js` 返回约 112 KB
+  bundle（当前源文件约 117 KB，含 `__ModuleLoader__.load`）；认证后的
   `GET /api/dsh-memory/state`、`GET /api/dsh-memory/memory?id=` 与 `POST /api/dsh-memory/action`
   的 create/update/pin/pause/resume/export/delete 全部返回正确 envelope。
 - **设置页图标与命令菜单行（2026-10-20 晚）**：本地 Harness 补丁完成并重建两个 client bundle 后，
   运行中的 3080 Host 已提供新版 `ui-commands`（含 `decorateFace`，82,626 B）与
-  `ui-settings-general`（含书签字形，61,897 B）；插件 `client.js` bundle（114,773 B）包含菜单行外观注册。
+  `ui-settings-general`（含书签字形，61,897 B）；插件 `client.js` bundle（v2 后约 117 KB）包含菜单行外观注册、项目路径/预算设置。
   设置 → 记忆 使用专属图标；输入框「+」菜单中的 `/memory` 行显示与「压缩」「模型」一致的原生行样式。
-- **测试**：`node --test test/*.test.js` → **236 pass / 0 fail**；`node --check` 全部通过；
-  oxlint 仅两份有意的控制字符正则警告。
+- **v2 存储改造（2026-10-20 晚）**：运行中的 3080 Host 热加载新代码后，真实 v1 `memory.json`
+  自动迁移为 Markdown：全局 13 个主题、项目 12 个主题，迁移 24 条且无缺失；`state.json` v2；
+  项目记忆落在 `/home/zhaodan/work/DeepseekChat/.dsh/dsh-memory/`，索引/正文可由外部编辑触发重载。
+- **测试**：`node --test test/*.test.js` → **199 pass / 0 fail**；`node --check` 全部通过；
+  `client.js` 当前约 117 KB。新增 frontmatter/topiccollection 覆盖手工格式、外部编辑、索引重建、
+  全局/项目路由、迁移、独立预算与 watch。
 
 ## 已知限制
 
@@ -214,6 +239,7 @@ npm test          # node --test test/*.test.js
   可能未判定（可手动 extract 或调小 `quietSeconds`）。
 - 召回是索引 + 关键词/相似度检索，不含向量嵌入语义检索（后续可扩展）。
 - 自动判定质量依赖模型；已有严格 JSON 校验、确定性去重、自动不删除、密钥脱敏与敏感类别策略兜底。
-- 多 Host 共用同一 `$DSH_HOME` 时状态文件是 last-writer-wins；正常单 Host 运行不受影响。
-- Web 半只读测试未做浏览器截图级验证（无浏览器自动化）；客户端逻辑经 jsdom/React 冒烟与真实
-  bundle/路由加载验证。
+- 多 Host 共用同一目录时是 last-writer-wins，无跨进程锁；audit 只记录本进程操作，冲突后以磁盘最新内容为准。
+- 项目记忆会出现在工作区 `.dsh/dsh-memory/`，可能被 git 跟踪；插件不自动改 `.gitignore`，请在提交前自行决定。
+- Web 半未做浏览器截图级自动化；客户端逻辑经真实 Host bundle/API 与页面刷新验证。
+- `MEMORY.md` 是生成索引；手工编辑会被下一次刷新覆盖，权威修改请编辑主题文件或使用设置页。
