@@ -2,7 +2,7 @@
 #
 # The row id is stable so a profile or home patch can override config later.
 # The plugin is self-contained: it imports no Harness package, reads its
-# settings from $DSH_HOME/dsh-memory/memory.json, and registers its Web half
+# settings from $DSH_HOME/dsh-memory/state.json, and registers its Web half
 # through package.json `dsh.client`.
 - insert:
     - id: dsh-memory

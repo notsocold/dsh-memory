@@ -97,16 +97,16 @@ test('judge: validateOperations sanitizes fields, binds project scope and caps c
   const parsed = {
     operations: [
       { op: 'create', title: 'T1', content: 'C1', kind: 'decision', scope: 'project', importance: 9, tags: ['x', 'x'] },
-      { op: 'create', title: 'T2', content: 'C2', kind: 'bad-kind' },
-      { op: 'create', title: '', content: 'C3', kind: 'reference' },
+      { op: 'create', title: 'T2', content: 'C2', kind: 'bad-kind', scope: 'project' },
+      { op: 'create', title: '', content: 'C3', kind: 'reference', scope: 'project' },
       { op: 'update', id: 'm_12345678', patch: { content: 'new', scope: 'global' } },
       { op: 'update', id: 'nope', patch: { content: 'x' } },
       { op: 'delete', id: 'm_12345678' },
-      { op: 'create', title: 'T3', content: 'C3', kind: 'reference' },
-      { op: 'create', title: 'T4', content: 'C4', kind: 'reference' },
-      { op: 'create', title: 'T5', content: 'C5', kind: 'reference' },
-      { op: 'create', title: 'T6', content: 'C6', kind: 'reference' },
-      { op: 'create', title: 'T7', content: 'C7', kind: 'reference' },
+      { op: 'create', title: 'T3', content: 'C3', kind: 'reference', scope: 'project' },
+      { op: 'create', title: 'T4', content: 'C4', kind: 'reference', scope: 'project' },
+      { op: 'create', title: 'T5', content: 'C5', kind: 'reference', scope: 'project' },
+      { op: 'create', title: 'T6', content: 'C6', kind: 'reference', scope: 'project' },
+      { op: 'create', title: 'T7', content: 'C7', kind: 'reference', scope: 'project' },
     ],
     skipped: [{ topic: 'x', reason: 'ephemeral' }, 'bad'],
   }
@@ -130,9 +130,52 @@ test('judge: validateOperations sanitizes fields, binds project scope and caps c
   assert.match(withoutProject.rejected[0].reason, /requires a current project/u)
 })
 
+test('judge: scope is required and project facts cannot silently become global', () => {
+  const project = { key: '/repos/a', name: 'a' }
+  const result = validateOperations({
+    operations: [
+      { op: 'create', title: 'Missing scope', content: 'Body.', kind: 'reference' },
+      { op: 'create', title: 'Project fact', content: 'Body.', kind: 'project', scope: 'global' },
+      { op: 'create', title: 'Cross-project fact', content: 'Body.', kind: 'reference', scope: 'global', scopeReason: 'Applies to every project.' },
+      { op: 'create', title: 'User preference', content: 'Body.', kind: 'preference', scope: 'global' },
+    ],
+  }, { project })
+  assert.equal(result.accepted.length, 3)
+  assert.ok(result.rejected.some(item => /scope is required/u.test(item.reason)))
+  assert.equal(result.accepted[0].scope, 'project')
+  assert.deepEqual(result.accepted[0].project, project)
+  assert.equal(result.accepted[1].scope, 'global')
+  assert.equal(result.accepted[2].scope, 'global')
+})
+
+test('judge: automatic extraction rejects creates below the importance floor', () => {
+  const low = validateOperations({
+    operations: [{
+      op: 'create', title: 'Low value', content: 'Body.', kind: 'reference', scope: 'global', importance: 2,
+    }],
+  }, { minImportance: 3 })
+  assert.equal(low.accepted.length, 0)
+  assert.match(low.rejected[0].reason, /importance .* below the automatic save floor/u)
+
+  const high = validateOperations({
+    operations: [{
+      op: 'create', title: 'Useful', content: 'Body.', kind: 'reference', scope: 'global', importance: 3,
+    }],
+  }, { minImportance: 3 })
+  assert.equal(high.accepted.length, 1)
+
+  const missing = validateOperations({
+    operations: [{
+      op: 'create', title: 'No importance', content: 'Body.', kind: 'reference', scope: 'global',
+    }],
+  }, { minImportance: 3 })
+  assert.equal(missing.accepted.length, 0)
+  assert.match(missing.rejected[0].reason, /importance is required/u)
+})
+
 test('judge: validateOperations redacts credentials in accepted content', () => {
   const result = validateOperations({
-    operations: [{ op: 'create', title: 'Token', content: 'api_key=sk-abcdefghijklmnopqrstuvwxyz012345', kind: 'reference' }],
+    operations: [{ op: 'create', title: 'Token', content: 'api_key=sk-abcdefghijklmnopqrstuvwxyz012345', kind: 'reference', scope: 'global' }],
   })
   assert.equal(result.accepted.length, 1)
   assert.match(result.accepted[0].content, /\[REDACTED\]/u)
@@ -163,6 +206,9 @@ test('judge: prompt payload carries the index, session facts and privacy policy'
   assert.equal(prompt.system, JUDGE_SYSTEM_PROMPT)
   assert.match(prompt.user, /Conversation span to distill/u)
   assert.match(prompt.user, /Return JSON only/u)
+  assert.match(prompt.system, /Every create MUST include scope/u)
+  assert.match(prompt.system, /VALUE BAR/u)
+  assert.match(prompt.system, /scopeReason/u)
   assert.equal(judgePromptOf({}), JUDGE_SYSTEM_PROMPT)
 })
 
@@ -177,7 +223,7 @@ test('judge: runJudge applies accepted operations on the session route', async (
           calls.push(options)
           return streamOf(textChunks(JSON.stringify({
             operations: [
-              { op: 'create', title: 'User prefers pnpm', content: 'The user always uses pnpm.', kind: 'preference', importance: 4 },
+              { op: 'create', title: 'User prefers pnpm', content: 'The user always uses pnpm.', kind: 'preference', scope: 'global', importance: 4 },
             ],
             skipped: [{ topic: 'greeting', reason: 'ephemeral' }],
           })))
@@ -207,6 +253,37 @@ test('judge: runJudge applies accepted operations on the session route', async (
     assert.equal(calls[0].temperature, 0)
     assert.equal(calls[0].maxTokens, JUDGE_MAX_TOKENS)
     assert.match(calls[0].system, /long-term memory curator/u)
+  } finally {
+    await cleanup(home)
+  }
+})
+
+test('judge: runJudge rejects creates below the configured importance floor', async () => {
+  const home = await makeHome()
+  try {
+    const store = await makeStore(home)
+    const ctx = {
+      llm: {
+        stream: () => streamOf(textChunks(JSON.stringify({
+          operations: [{
+            op: 'create', title: 'Low value', content: 'Body.', kind: 'reference', scope: 'global', importance: 2,
+          }],
+        }))),
+      },
+      get: () => undefined,
+    }
+    const result = await runJudge({
+      ctx,
+      store,
+      snapshot: makeSnapshot([], { sessionId: 's-floor' }),
+      extraction: { transcript: '[user] something', humanMessages: 1, humanChars: 9, toolNames: [] },
+      signal: new AbortController().signal,
+      minimumImportance: 3,
+    })
+    assert.equal(result.status, 'ok')
+    assert.equal(result.created, 0)
+    assert.match(result.rejected[0].reason, /below the automatic save floor/u)
+    assert.equal(store.memories.length, 0)
   } finally {
     await cleanup(home)
   }

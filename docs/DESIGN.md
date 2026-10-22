@@ -102,7 +102,8 @@ audit.jsonl 追加
   `MEMORY.md` 自身写不会造成循环。
 - 兜底：prompt 组装前最多每 10s 全量重读一次（在 mtime 粒度粗/VM 文件系统上也不会漏检）。
 - 外部写主题文件：刷新后生效；外部删除：记录移除；外部改 `MEMORY.md`：被重建覆盖。
-- 读取路径若目录不存在：保持空集合，不创建目录；首次写入才 `mkdir -p`。
+- 读取路径若目录不存在：保持空集合，不创建目录；首次写入才 `mkdir -p`。项目目录是懒创建的，
+  有会话但没有可保存记忆时不会出现空目录。
 
 ## 9. 迁移
 
@@ -119,7 +120,8 @@ audit.jsonl 追加
 ## 10. 判定与触发
 
 - 静默 30s / 新会话边界 / 销毁 / 启动补判 / 手动；
-- 队列并发 1，水位线防重复；门限：新增人类字符、最小间隔、每小时上限；
+- 队列并发 1，水位线防重复；门限：新增对话字符（人类 + 助手）、最小间隔、每小时上限；
+- 自动 create 还要过价值闸门：`scope` 必填，项目事实默认 project；项目会话的 global 非用户偏好必须带 `scopeReason`；自动 create 必须显式给出 importance，低于 `autoSaveMinImportance`（默认 3）的拒绝；
 - 当前会话模型路由；严格 JSON create/update；自动不 delete；密钥脱敏 + 敏感类别策略；
 - 活动记录触发、状态、created/updated/skipped、原因、项目 key。
 
@@ -132,7 +134,7 @@ audit.jsonl 追加
 
 ## 12. 验证
 
-- `node --test test/*.test.js`：199+ 项（state/frontmatter/topiccollection/store/inject/judge/
+- `node --test test/*.test.js`：207+ 项（state/frontmatter/topiccollection/store/inject/judge/
   extractor/tools/api/commands/regressions）。
 - `node --check index.js client.js lib/*.js`。
 - 真机：运行中的 3080 Host 热加载后，真实 v1 数据迁到全局 13 个主题 + 项目 12 个主题（迁移 24 条，

@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Extractor } from '../lib/extractor.js'
 import {
   assistantEvent,
@@ -15,6 +18,11 @@ import {
 } from './helpers.js'
 
 /** Long enough to pass the default `minNewChars` gate. */
+/** @returns {Promise<string>} temporary workspace. */
+async function makeWorkspaceDir() {
+  return mkdtemp(join(tmpdir(), 'dsh-memory-extractor-ws-'))
+}
+
 const LONG_TEXT = 'Please remember that this project always uses pnpm for every package installation, and that the staging deployment target is a host named tatooine which is only reachable from the office network.'
 
 /**
@@ -111,6 +119,86 @@ test('extractor: running cancels the pending debounce and a later idle reschedul
   }
 })
 
+test('extractor: a short question with a substantial assistant answer can trigger extraction', async () => {
+  const home = await makeHome()
+  try {
+    const store = await makeStore(home)
+    const events = [
+      userEvent(0, '这个项目有没有认证和鉴权'),
+      assistantEvent(1, LONG_TEXT),
+    ]
+    const { agent } = makeAgent({ events })
+    const timers = makeTimers()
+    const { judge, calls } = makeJudge({ store })
+    const extractor = new Extractor({
+      ctx: makeCtx({ agents: [agent] }),
+      store,
+      judge,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    })
+    extractor.onStatus({ agent, status: 'idle' })
+    timers.fire()
+    await waitForActivity(store)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].extraction.humanChars, '这个项目有没有认证和鉴权'.length)
+    assert.equal(calls[0].minimumImportance, 3)
+    assert.ok(calls[0].extraction.assistantChars >= LONG_TEXT.length)
+    assert.ok(calls[0].extraction.totalChars >= 120)
+    await extractor.dispose()
+  } finally {
+    await cleanup(home)
+  }
+})
+
+test('extractor: a short question plus a long answer saves a project topic in the workspace', async () => {
+  const home = await makeHome()
+  const workspace = await makeWorkspaceDir()
+  try {
+    const store = await makeStore(home)
+    const events = [
+      userEvent(0, '这个项目有没有认证和鉴权'),
+      assistantEvent(1, LONG_TEXT),
+    ]
+    const { agent } = makeAgent({ events, header: { cwd: workspace, createdAt: 1 } })
+    const timers = makeTimers()
+    const calls = []
+    const judge = async (input) => {
+      calls.push(input)
+      store.create({
+        title: 'Project authentication answer',
+        content: 'The project has no authentication or authorization layer.',
+        kind: 'project',
+        scope: 'project',
+        project: { key: input.snapshot.projectKey, name: 'workspace' },
+      }, { origin: 'auto', source: { sessionId: input.snapshot.sessionId } })
+      return { status: 'ok', created: 1, updated: 0, skipped: 0 }
+    }
+    const extractor = new Extractor({
+      ctx: makeCtx({ agents: [agent] }),
+      store,
+      judge,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    })
+    extractor.onStatus({ agent, status: 'idle' })
+    timers.fire()
+    await waitForActivity(store)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].snapshot.projectKey, workspace)
+    const record = store.memories.find(item => item.scope === 'project')
+    assert.ok(record !== undefined)
+    assert.equal(record.project.key, workspace)
+    const files = await readdir(join(workspace, '.dsh', 'dsh-memory'))
+    assert.ok(files.some(name => name.startsWith(record.id)))
+    assert.ok(files.includes('MEMORY.md'))
+    await extractor.dispose()
+  } finally {
+    await cleanup(home)
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 test('extractor: quiet extraction gates skip tiny spans and respect per-session intervals', async () => {
   const home = await makeHome()
   try {
@@ -160,6 +248,7 @@ test('extractor: manual extraction bypasses content and interval gates', async (
     const result = await extractor.extractNow(agent)
     assert.equal(result.status, 'ok')
     assert.equal(calls.length, 1)
+    assert.equal(calls[0].minimumImportance, 1)
     assert.equal(store.state.activity[0].trigger, 'manual')
     await extractor.dispose()
   } finally {

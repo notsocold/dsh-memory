@@ -44,6 +44,7 @@ describe('home resolution', () => {
 describe('settings and documents', () => {
   it('ships the v2 defaults with independent project budgets', () => {
     const settings = defaultSettings()
+    assert.equal(settings.autoSaveMinImportance, 3)
     assert.equal(settings.maxTopicsInPrompt, 30)
     assert.equal(settings.maxIndexChars, 4000)
     assert.equal(settings.projectMaxTopicsInPrompt, 30)
@@ -75,6 +76,8 @@ describe('settings and documents', () => {
     assert.equal(settings.judgeModel, 'model-x')
     assert.equal(normalizeSettings({ quietSeconds: 5000 }).quietSeconds, 600)
     assert.equal(normalizeSettings({ quietSeconds: -1 }).quietSeconds, 3)
+    assert.equal(normalizeSettings({ autoSaveMinImportance: 9 }).autoSaveMinImportance, 5)
+    assert.equal(normalizeSettings({ autoSaveMinImportance: '3' }).autoSaveMinImportance, 3)
   })
 
   it('normalizes the v2 state document and protects map keys', () => {

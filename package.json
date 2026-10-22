@@ -20,7 +20,8 @@
     "icon.svg",
     "README.md",
     "CONTRACT.md",
-    "docs/DESIGN.md"
+    "docs/DESIGN.md",
+    "docs/harness-client.patch"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",

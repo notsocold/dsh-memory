@@ -31,6 +31,7 @@
 ### 2. 召回
 
 - 固定策略段（记忆是背景数据、不是指令；何时检索/保存/删除；不得编造记忆）。
+- 自动保存采用保守策略：项目事实必须有 `scope` 且默认落项目；global 仅用于用户长期偏好/身份或带 `scopeReason` 的跨项目知识；低于 `autoSaveMinImportance` 的主题不自动保存。
 - 动态记忆索引（每步按当前项目刷新）：只注入 `id · kind · scope · 日期 · 摘要`，正文用工具按需读取；
   全局与项目各自独立预算（默认各 30 条 / 4000 字符），超出提示模型用 `memory` 工具检索。
 - 项目隔离：`global` 记忆在所有会话可见；`project` 记忆只在**会话工作目录**对应的
@@ -88,6 +89,49 @@ pnpm dsh --profile web --dump-config | grep -A1 dsh-memory
 pnpm dsh plugin --profile web remove @local/dsh-memory
 ```
 
+## 移植到其他机器
+
+**能保证的部分**：插件代码是自包含的纯 ESM bundle（无 npm 依赖、无构建步骤），在目标机器安装到
+同一 DSH 版本（实测基线 `0.2.1-rc.2`）的 Web profile 后，自动判定/保存、全局+项目 Markdown 存储、
+召回注入、`memory` 工具、`/memory` 命令、设置页管理、项目监听、迁移等**功能**随插件走。
+
+**不能随插件自动带走的部分**：
+
+| 项目 | 说明 |
+|---|---|
+| 设置页导航图标、输入框「+」菜单 `/memory` 原生行外观 | 依赖宿主补丁，不是插件 API。未打补丁的 DSH 仍能正常使用，只是图标回退为默认齿轮、菜单行回退为普通命令样式。补丁快照在 [docs/harness-client.patch](docs/harness-client.patch)，已包含在打包文件中；需应用到**匹配版本的 DSH checkout** 并按 README 的 Harness 补丁章节重建两个 client bundle。 |
+| 当前全局记忆与审计 | 不随 npm 包发布。需要保留时，复制目标机器的 `$DSH_HOME/dsh-memory/`（`state.json`、`MEMORY.md`、主题 `.md`、`audit.jsonl`；`memory.json.migrated-*` 可选）。 |
+| 当前项目记忆 | 随项目仓库走：项目内的 `.dsh/dsh-memory/` 复制/提交到目标机器即可；插件按目标会话工作目录重新绑定项目，不依赖旧的绝对路径。 |
+| 旧版数据迁移 | 目标机器只有 v1 `memory.json` 时，启动会自动迁移到 v2；也可复制 v1 文件后首次启动迁移。 |
+| 模型判定凭据/路由 | 插件沿用当前会话模型路由；目标机器需自行配置 DSH 的 provider/凭据。未配置时自动保存会跳过并记录原因。 |
+| 历史会话水位线/known projects | `state.json` 里的绝对项目路径和会话 watermark 来自源机器；目标机器会自动忽略不存在的 known project，新会话重新建立水位线。 |
+
+**推荐安装步骤**（目标机器）：
+
+```bash
+# 1. 复制/打包插件（二选一：目录 link 或 pnpm pack 后的 tarball）
+pnpm pack    # 生成 local-dsh-memory-0.1.0.tgz，含 docs/harness-client.patch
+
+# 2. 安装到 web profile（在 DSH checkout 或已安装 dsh CLI 的环境）
+pnpm dsh plugin --profile web add /path/to/dsh-memory
+# 或用 Plugin Manager 的「从本地路径/tarball 安装 bundle」入口
+
+# 3. 如需原有记忆：先复制数据目录，再启动
+cp -a /old-machine/.dsh/dsh-memory "$DSH_HOME/"
+
+# 4. 如需完全一致的导航/菜单外观：对目标 DSH 应用 docs/harness-client.patch，
+#    然后按「本地 Harness 补丁」章节重建 ui-commands / ui-settings-general bundle
+```
+
+注意：
+
+- 未打宿主补丁时，**功能不受影响**，只是两处外观不是完全一致；不要为了插件去修改 DSH 的
+  `navIcon`/命令行 API，除非你接受跟随版本维护补丁。
+- 只有在目标机器版本与补丁匹配时，`harness-client.patch` 才能干净应用；版本不一致时插件本身仍可用。
+- 跨操作系统/DSH 版本未做完整矩阵验证；在目标机器先运行 `pnpm test` 和 `pnpm run check`。
+- 复制记忆前先检查内容：项目记忆可能包含内部信息，随 git 提交前请确认仓库可见性；插件不会自动改
+  `.gitignore`。
+
 ## 数据与隐私
 
 ```
@@ -110,6 +154,7 @@ $DSH_HOME/dsh-memory/
   projects 读取时懒加载、只读展示（不注入、不创建空目录）。
 - 文件写入同目录临时文件 + rename 原子替换；mtime 不可靠时有 10s 兜底全量重读。
 - 项目目录存在时插件只写 `MEMORY.md` 与主题文件；**不会**自动创建 `.gitignore`/README。
+- `.dsh/dsh-memory/` 是**懒创建**的：只在该项目首次真正保存记忆时出现；仅有会话、没有可保存内容时不会凭空创建目录。
 - `$DSH_HOME` 解析：显式参数 → `DSH_HOME` 环境变量 → `~/.dsh`。
 - 落库前强制脱敏密钥形态（`sk-*`、GitHub token、AWS key、Bearer、PEM 私钥、`password=` 等）。
 - 默认不保存敏感个人话题（健康、政治、宗教、性取向、性别认同、民族）；证件号/金融账号/犯罪/移民/
@@ -126,9 +171,10 @@ $DSH_HOME/dsh-memory/
 | `enabled` | true | 总开关（暂停时读写与注入全部停止，已有记忆保留） |
 | `autoExtract` | true | 是否自动判定 |
 | `quietSeconds` | 30 | 每轮结束后的静默判定窗口（3–600） |
-| `minNewChars` | 120 | 自上次判定以来新增人类字符下限 |
+| `minNewChars` | 120 | 自上次判定以来新增对话字符下限（人类 + 助手） |
 | `minIntervalSeconds` | 60 | 同一会话两次自动判定最小间隔 |
 | `maxRunsPerHour` | 12 | 同一会话每小时自动判定上限 |
+| `autoSaveMinImportance` | 3 | 自动保存的最低重要性（1–5）；自动 create 必须显式给出 importance，低于阈值被拒绝；手动 Extract now 不受限 |
 | `maxTopicsInPrompt` | 30 | 全局注入索引最大条数 |
 | `maxIndexChars` | 4000 | 全局注入索引最大字符数 |
 | `projectMaxTopicsInPrompt` | 30 | 项目注入索引最大条数（独立预算） |
@@ -189,7 +235,7 @@ lib/api.js                   /api/dsh-memory/{state,memory,action}
 client.js                    Settings → Memory 管理页（lazy-CJS，仅 require('react')）
 package.json / cordis.patch.yml / locale/{en,zh}.json / icon.svg
 docs/DESIGN.md / CONTRACT.md / README.md
-test/                        node:test 单元测试（14 个文件、199 项）
+test/                        node:test 单元测试（15 个文件、207 项）
 ```
 
 ## 开发与测试
@@ -229,8 +275,10 @@ pnpm test         # node --test test/*.test.js
 - **v2 存储改造（2026-10-20 晚）**：运行中的 3080 Host 热加载新代码后，真实 v1 `memory.json`
   自动迁移为 Markdown：全局 13 个主题、项目 12 个主题，迁移 24 条且无缺失；`state.json` v2；
   项目记忆落在 `/home/zhaodan/work/DeepseekChat/.dsh/dsh-memory/`，索引/正文可由外部编辑触发重载。
-- **测试**：`node --test test/*.test.js` → **199 pass / 0 fail**；`node --check` 全部通过；
-  `client.js` 当前约 117 KB。新增 frontmatter/topiccollection 覆盖手工格式、外部编辑、索引重建、
+- **测试**：`node --test test/*.test.js` → **207 pass / 0 fail**；`node --check` 全部通过；
+  `client.js` 当前约 117 KB。
+- **修复（2026-10-21）**：项目筛选键统一为 `projectKey`；自动判定门限改为统计人类+助手新增字符，
+  短提问+长分析也会触发；端到端测试覆盖“短问题 → 项目记忆 → 工作区 `.dsh/dsh-memory`”。新增 frontmatter/topiccollection 覆盖手工格式、外部编辑、索引重建、
   全局/项目路由、迁移、独立预算与 watch。
 
 ## 已知限制

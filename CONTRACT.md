@@ -77,6 +77,7 @@ model: "provider/model"
 - `MEMORY.md` 由插件从主题文件生成：按 pinned、importance、updatedAt 排序，排除 archived，
   含相对链接、摘要、kind/importance/日期；越界修改会在下一次刷新时被覆盖。
 - 空目录/不存在目录的“加载”是只读的，不会创建目录；只有真正写入主题/迁移时才 `mkdir -p`。
+  因此工作区有会话但没有项目记忆时，不会出现空的 `.dsh/dsh-memory/`。
 
 ### 2.3 运行状态 `state.json`（`version: 2`）
 
@@ -87,9 +88,10 @@ model: "provider/model"
     "enabled": true,
     "autoExtract": true,
     "quietSeconds": 30,
-    "minNewChars": 120,
+    "minNewChars": 120,      // 人类 + 助手新增对话字符下限
     "minIntervalSeconds": 60,
     "maxRunsPerHour": 12,
+    "autoSaveMinImportance": 3,      // 自动 create 的最低重要性（1-5）；手动提取不受限
     "maxTopicsInPrompt": 30,          // 全局索引预算
     "maxIndexChars": 4000,
     "projectMaxTopicsInPrompt": 30,   // 项目索引独立预算
@@ -199,11 +201,17 @@ model: "provider/model"
 ## 6. 判定与触发
 
 触发：静默 `quietSeconds`（默认 30s）、新会话边界、会话销毁、插件启动补判、手动
-`memory extract`/`/memory extract`/设置页 Extract now。队列并发 1；门限 `minNewChars`、
+`memory extract`/`/memory extract`/设置页 Extract now。队列并发 1；门限 `minNewChars`（人类 + 助手新增对话字符）、
 `minIntervalSeconds`、`maxRunsPerHour`；水位线在 drain 前二次校验。
 
 判定使用当前会话模型路由（设置可覆盖 `judgeProvider/judgeModel`），严格 JSON create/update，
-自动永不 delete；落库前密钥脱敏 + 敏感类别策略。`created/updated/skipped/rejected` 写入活动。
+自动永不 delete；落库前密钥脱敏 + 敏感类别策略。
+
+**保存策略硬约束**：
+- 每个 create 必须显式带 `scope`，缺失即拒绝；项目会话中的项目/环境/架构/命令/安全/实现决策必须用 `project`。
+- 项目会话中 `global` 仅允许 `kind:user|preference`，或提供非空 `scopeReason` 的跨项目知识；否则自动落为项目主题，避免全局污染。
+- 自动 create 必须显式给出 `importance`，低于 `autoSaveMinImportance`（默认 3）时拒绝；手动 Extract now 使用下限 1。
+- 提示词要求跳过 status/progress、已暂停/取消的计划、可从代码/文档/git 恢复的实现细节、测试数量/提交 hash、一次性问答和重复主题。`created/updated/skipped/rejected` 写入活动。
 
 ## 7. 工具与命令
 
@@ -253,3 +261,17 @@ model: "provider/model"
 `node --test test/*.test.js` 覆盖：state v2/迁移、frontmatter 容忍格式、topic collection 读写/索引/
 外部编辑、store 全局/项目路由/去重/配额/预算、注入、判定、提取、工具、API、命令与回归项。
 `node --check index.js client.js lib/*.js` 必须通过。
+
+## 12. 可移植性
+
+- 插件包自包含：无 npm 依赖、无构建步骤；Host 半不 import 任何 Harness 包，Client 半只 require React。
+  在 DSH `0.2.1-rc.2` + Web profile 上验证。跨 DSH 版本/操作系统未做完整矩阵验证。
+- 功能（自动判定、全局/项目 Markdown 存储、召回、工具/命令、设置页、监听、迁移）随插件走。
+- 两处外观依赖本地 Harness 补丁：设置页导航图标（`SettingsRoot.tsx`）与 `/memory` 命令行的原生
+  `decorateFace`。未打补丁的宿主回退为默认图标/普通命令样式，功能不受影响；补丁快照
+  `docs/harness-client.patch` 随包分发，需应用到匹配 host checkout 并重建 client bundle。
+- 现有记忆数据不随包发布：复制 `$DSH_HOME/dsh-memory/` 以及项目 `.dsh/dsh-memory/`；
+  项目记忆可随项目 git 一起移动。旧 v1 `memory.json` 会在首次启动时迁移。
+- 目标机器的模型 provider/凭据、profile 组合需自行配置；插件默认沿用当前会话模型路由。
+- Known projects 和会话 watermark 中的绝对路径/会话 id 来自源机器；不存在的项目会被忽略，
+  新会话重新建立 watermark。

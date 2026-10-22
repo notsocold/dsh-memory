@@ -67,6 +67,7 @@ window.__ModuleLoader__.load({
       { key: 'minNewChars', min: 0, max: 100000, fallback: 120 },
       { key: 'minIntervalSeconds', min: 0, max: 86400, fallback: 60 },
       { key: 'maxRunsPerHour', min: 1, max: 1000, fallback: 12 },
+      { key: 'autoSaveMinImportance', min: 1, max: 5, fallback: 3 },
       { key: 'maxTopicsInPrompt', min: 1, max: 500, fallback: 30 },
       { key: 'maxIndexChars', min: 500, max: 200000, fallback: 4000 },
       { key: 'projectMaxTopicsInPrompt', min: 1, max: 500, fallback: 30 },
@@ -82,6 +83,7 @@ window.__ModuleLoader__.load({
       minNewChars: 120,
       minIntervalSeconds: 60,
       maxRunsPerHour: 12,
+      autoSaveMinImportance: 3,
       maxTopicsInPrompt: 30,
       maxIndexChars: 4000,
       projectMaxTopicsInPrompt: 30,
@@ -149,9 +151,10 @@ window.__ModuleLoader__.load({
       'advanced.autoExtract.hint': 'Let the assistant judge finished spans and save topics.', 'advanced.projectsEnabled': 'Recall project-scoped memories', 'advanced.projectsEnabled.hint': 'Inject memories from the current project in addition to global ones.',
       'advanced.toolEnabled': 'Expose the memory tool', 'advanced.toolEnabled.hint': 'Allow the model to search, read, and save memories through its tool.', 'advanced.allowModelDelete': 'Allow model-requested deletions',
       'advanced.allowModelDelete.hint': 'The model may forget a memory only when the user explicitly asks.', 'advanced.redactSecrets': 'Redact secrets before saving', 'advanced.redactSecrets.hint': 'Strip credential-like strings from stored titles, summaries, and bodies.',
-      'advanced.quietSeconds': 'Quiet period before judging (seconds, 3–600)', 'advanced.quietSeconds.hint': 'How long a conversation must be idle after a turn.', 'advanced.minNewChars': 'Minimum new characters (0–100000)',
-      'advanced.minNewChars.hint': 'New human text required since the previous run.', 'advanced.minIntervalSeconds': 'Minimum gap per session (seconds, 0–86400)', 'advanced.minIntervalSeconds.hint': 'Two automatic runs in one session never start closer than this.',
-      'advanced.maxRunsPerHour': 'Maximum automatic runs per hour (1–1000)', 'advanced.maxRunsPerHour.hint': 'Per-session cap on automatic extraction.', 'advanced.maxTopicsInPrompt': 'Index topics injected (1–500)',
+      'advanced.quietSeconds': 'Quiet period before judging (seconds, 3–600)', 'advanced.quietSeconds.hint': 'How long a conversation must be idle after a turn.', 'advanced.minNewChars': 'Minimum new conversation characters (0–100000)',
+      'advanced.minNewChars.hint': 'New conversation text (human + assistant) required since the previous run.', 'advanced.minIntervalSeconds': 'Minimum gap per session (seconds, 0–86400)', 'advanced.minIntervalSeconds.hint': 'Two automatic runs in one session never start closer than this.',
+      'advanced.maxRunsPerHour': 'Maximum automatic runs per hour (1–1000)', 'advanced.maxRunsPerHour.hint': 'Per-session cap on automatic extraction.', 'advanced.autoSaveMinImportance': 'Minimum importance for automatic saves (1–5)',
+      'advanced.autoSaveMinImportance.hint': 'Automatic extraction rejects lower-importance creates; manual Extract now bypasses this floor.', 'advanced.maxTopicsInPrompt': 'Index topics injected (1–500)',
       'advanced.maxTopicsInPrompt.hint': 'Upper bound on memory lines placed in the prompt.', 'advanced.maxIndexChars': 'Index size budget (characters, 500–200000)', 'advanced.maxIndexChars.hint': 'Character budget for the injected global index.',
       'advanced.projectMaxTopicsInPrompt': 'Project index topics injected (1–500)',
       'advanced.projectMaxTopicsInPrompt.hint': 'Upper bound on project memory lines placed in the prompt.',
@@ -225,9 +228,10 @@ window.__ModuleLoader__.load({
       'advanced.autoExtract.hint': '允许助手判定已结束的对话片段并保存主题。', 'advanced.projectsEnabled': '召回项目级记忆', 'advanced.projectsEnabled.hint': '在全局记忆之外，同时注入当前项目的记忆。',
       'advanced.toolEnabled': '向模型开放记忆工具', 'advanced.toolEnabled.hint': '允许模型通过工具搜索、读取和保存记忆。', 'advanced.allowModelDelete': '允许模型请求删除',
       'advanced.allowModelDelete.hint': '仅当用户明确要求时，模型才可忘记某条记忆。', 'advanced.redactSecrets': '保存前脱敏密钥', 'advanced.redactSecrets.hint': '从标题、摘要和正文中移除凭据形态的字符串。',
-      'advanced.quietSeconds': '判定前静默时长（秒，3–600）', 'advanced.quietSeconds.hint': '一轮对话结束后需静默多久才触发判定。', 'advanced.minNewChars': '最少新增字符数（0–100000）',
-      'advanced.minNewChars.hint': '自上次运行以来需要新增的人类文本长度。', 'advanced.minIntervalSeconds': '同一会话最小间隔（秒，0–86400）', 'advanced.minIntervalSeconds.hint': '同一会话内两次自动运行的最近间隔。',
-      'advanced.maxRunsPerHour': '每小时最多自动运行次数（1–1000）', 'advanced.maxRunsPerHour.hint': '每个会话的自动提取次数上限。', 'advanced.maxTopicsInPrompt': '注入索引的最大条数（1–500）',
+      'advanced.quietSeconds': '判定前静默时长（秒，3–600）', 'advanced.quietSeconds.hint': '一轮对话结束后需静默多久才触发判定。', 'advanced.minNewChars': '最少新增对话字符数（0–100000）',
+      'advanced.minNewChars.hint': '自上次运行以来需要新增的对话文本长度（人类 + 助手）。', 'advanced.minIntervalSeconds': '同一会话最小间隔（秒，0–86400）', 'advanced.minIntervalSeconds.hint': '同一会话内两次自动运行的最近间隔。',
+      'advanced.maxRunsPerHour': '每小时最多自动运行次数（1–1000）', 'advanced.maxRunsPerHour.hint': '每个会话的自动提取次数上限。', 'advanced.autoSaveMinImportance': '自动保存的最低重要性（1–5）',
+      'advanced.autoSaveMinImportance.hint': '自动判定会拒绝低于此重要性的新建主题；手动 Extract now 不受此下限限制。', 'advanced.maxTopicsInPrompt': '注入索引的最大条数（1–500）',
       'advanced.maxTopicsInPrompt.hint': '提示词中最多放入多少条记忆。', 'advanced.maxIndexChars': '索引字符预算（字符，500–200000）', 'advanced.maxIndexChars.hint': '注入的全局记忆索引允许占用的最大字符数。',
       'advanced.projectMaxTopicsInPrompt': '项目索引注入条数（1–500）',
       'advanced.projectMaxTopicsInPrompt.hint': '提示词中最多放入多少条项目记忆。',
@@ -953,7 +957,7 @@ window.__ModuleLoader__.load({
         filter('scope', t('toolbar.scope'), scopeOptions),
         filter('kind', t('toolbar.kind'), kindOptions),
         filter('status', t('toolbar.status'), statusOptions),
-        projects.length === 0 ? null : filter('project', t('toolbar.project'), projectOptions),
+        projects.length === 0 ? null : filter('projectKey', t('toolbar.project'), projectOptions),
         h('div', { className: 'dshmemory-toolbarActions' },
           h(Button, { variant: 'ghost', onClick: onClearFilters }, t('toolbar.clearFilters')),
           h(Button, { variant: 'ghost', disabled: busy || refreshing, onClick: onRefresh },
@@ -1860,6 +1864,10 @@ window.__ModuleLoader__.load({
       try {
         if (typeof ctx.inject === 'function') {
           ctx.inject(['commandUi'], (scoped) => {
+            // Stock Harness exposes commandUi without this local extension; only
+            // decorate the row when the optional API is present.
+            if (scoped?.commandUi === undefined || scoped?.commandUi === null
+              || typeof scoped.commandUi.decorateFace !== 'function') return
             scoped.effect(() => scoped.commandUi.decorateFace(face()), 'dsh-memory: command menu face')
           })
           return

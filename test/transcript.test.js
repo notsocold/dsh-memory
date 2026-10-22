@@ -295,6 +295,8 @@ describe('buildExtractionInput', () => {
 
     assert.equal(result.humanMessages, 1)
     assert.equal(result.humanChars, 5)
+    assert.equal(result.assistantChars, 6)
+    assert.equal(result.totalChars, 11)
     assert.equal(result.compactionSummary, 'summary text')
     assert.deepEqual(result.toolNames, ['bash', 'read'])
     assert.equal(result.nextSeq, 9)
@@ -318,6 +320,8 @@ describe('buildExtractionInput', () => {
       compactionSummary: '',
       humanMessages: 0,
       humanChars: 0,
+      assistantChars: 0,
+      totalChars: 0,
       // The current contract uses -1 as "nothing processed yet" (sequences start at 0).
       nextSeq: -1,
       totalEvents: 0,
