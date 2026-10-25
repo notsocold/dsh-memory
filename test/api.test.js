@@ -267,3 +267,40 @@ test('api: unexpected route failures report an internal error', async () => {
     await cleanup(home)
   }
 })
+
+test('api: events streams a change frame after a store mutation', async () => {
+  const home = await makeHome()
+  try {
+    const store = await makeStore(home)
+    const route = buildRoutes({ store }).find(item => item.path.endsWith('/events'))
+    assert.ok(route !== undefined)
+    const response = await route.fetch(new Request(`http://dsh.invalid${API_PREFIX}/events`, {
+      headers: { accept: 'text/event-stream' },
+    }))
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/u)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    /**
+     * @param {string} needle - text to wait for.
+     * @returns {Promise<string>} frames read so far.
+     */
+    const readUntil = async (needle) => {
+      let text = ''
+      for (let index = 0; index < 20 && !text.includes(needle); index += 1) {
+        const { value, done } = await reader.read()
+        if (done) break
+        text += decoder.decode(value, { stream: true })
+      }
+      return text
+    }
+    const opening = await readUntil('retry: 5000')
+    assert.match(opening, /dsh-memory events/u)
+    store.create({ title: 'Streamed', content: 'Body text.', kind: 'reference' })
+    const changed = await readUntil('data: {"type":"change"}')
+    assert.match(changed, /data: \{"type":"change"\}/u)
+    await reader.cancel()
+  } finally {
+    await cleanup(home)
+  }
+})

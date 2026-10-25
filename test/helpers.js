@@ -125,7 +125,7 @@ export function makeAgent(options = {}) {
   const events = options.events ?? []
   const session = {
     id: options.sessionId ?? 'sess-test',
-    header: options.header ?? { cwd: '/tmp/project', createdAt: 1 },
+    header: options.header ?? { cwd: '/tmp/project', createdAt: Date.now() },
     seq: events.length,
     snapshotEvents: () => events,
     requestHeader: () => (options.route === undefined ? undefined : { config: options.route }),

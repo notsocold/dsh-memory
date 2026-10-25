@@ -161,7 +161,12 @@ export async function apply(ctx) {
   })()) {
     attachProject(agent)
   }
-  ctx.on('agent/created', (payload) => { attachProject(payload?.agent ?? payload) })
+  ctx.on('agent/created', (payload) => {
+    const agent = payload?.agent ?? payload
+    attachProject(agent)
+    // Seed baselines for imported/historical sessions before they receive new messages.
+    extractor.observeAgent(agent)
+  })
   ctx.on('agent/disposed', (payload) => { detachProject(payload?.agent ?? payload) })
   ctx.on('session/disposed', (session) => { detachProject(session) })
   ctx.on('session/event', (sessionOrPayload, maybeEvent) => {

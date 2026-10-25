@@ -45,6 +45,7 @@ describe('settings and documents', () => {
   it('ships the v2 defaults with independent project budgets', () => {
     const settings = defaultSettings()
     assert.equal(settings.autoSaveMinImportance, 3)
+    assert.equal(settings.autoExtractExistingSessions, false)
     assert.equal(settings.maxTopicsInPrompt, 30)
     assert.equal(settings.maxIndexChars, 4000)
     assert.equal(settings.projectMaxTopicsInPrompt, 30)
@@ -86,6 +87,8 @@ describe('settings and documents', () => {
       settings: { quietSeconds: 12 },
       watermarks: {
         'sess-1': { seq: 4, at: '2026-01-01T00:00:00.000Z', chars: 10 },
+        'sess-baseline': { seq: 2, at: '2026-01-01T00:00:00.000Z', chars: 0, baseline: true },
+        'sess-empty-baseline': { seq: -1, at: '2026-01-01T00:00:00.000Z', chars: 0, baseline: true },
         ['__proto__']: { seq: 7, at: '2026-01-01T00:00:00.000Z', chars: 1 },
       },
       sessionOptOut: { 'sess-2': true, ['__proto__']: true },
@@ -101,6 +104,9 @@ describe('settings and documents', () => {
     })))
     assert.equal(state.version, 2)
     assert.equal(state.watermarks['sess-1'].seq, 4)
+    assert.equal(state.watermarks['sess-1'].baseline, undefined)
+    assert.equal(state.watermarks['sess-baseline'].baseline, true)
+    assert.equal(state.watermarks['sess-empty-baseline'].seq, -1)
     assert.equal(Object.getPrototypeOf(state.watermarks), Object.prototype)
     assert.equal(state.sessionOptOut['sess-2'], true)
     assert.equal(state.activity.length, 1)

@@ -160,7 +160,7 @@ test('extractor: a short question plus a long answer saves a project topic in th
       userEvent(0, '这个项目有没有认证和鉴权'),
       assistantEvent(1, LONG_TEXT),
     ]
-    const { agent } = makeAgent({ events, header: { cwd: workspace, createdAt: 1 } })
+    const { agent } = makeAgent({ events, header: { cwd: workspace, createdAt: Date.now() } })
     const timers = makeTimers()
     const calls = []
     const judge = async (input) => {
@@ -256,6 +256,102 @@ test('extractor: manual extraction bypasses content and interval gates', async (
   }
 })
 
+test('extractor: historical sessions are baselined and only manual extraction processes them', async () => {
+  const home = await makeHome()
+  try {
+    const store = await makeStore(home)
+    const events = [userEvent(0, LONG_TEXT), assistantEvent(1, 'Noted.')]
+    const { agent } = makeAgent({
+      events,
+      header: { cwd: '/tmp/project', createdAt: Date.now() - 60 * 60 * 1000 },
+    })
+    const timers = makeTimers()
+    const { judge, calls } = makeJudge({ store })
+    const extractor = new Extractor({
+      ctx: makeCtx({ agents: [agent] }),
+      store,
+      judge,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    })
+    extractor.onStatus({ agent, status: 'idle' })
+    assert.equal(timers.pending(), 0)
+    assert.equal(calls.length, 0)
+    const baseline = store.getWatermark('sess-test')
+    assert.equal(baseline.baseline, true)
+    assert.equal(baseline.seq, 1)
+
+    const manual = await extractor.extractNow(agent)
+    assert.equal(manual.status, 'ok', String(manual.reason))
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].extraction.humanMessages, 1)
+    assert.match(calls[0].extraction.transcript, /pnpm/u)
+    const after = store.getWatermark('sess-test')
+    assert.equal(after.baseline, undefined)
+    await extractor.dispose()
+  } finally {
+    await cleanup(home)
+  }
+})
+
+test('extractor: start() baselines historical sessions without scheduling a judge', async () => {
+  const home = await makeHome()
+  try {
+    const store = await makeStore(home)
+    const events = [userEvent(0, LONG_TEXT)]
+    const { agent } = makeAgent({
+      events,
+      header: { cwd: '/tmp/project', createdAt: Date.now() - 60 * 60 * 1000 },
+    })
+    const timers = makeTimers()
+    const { judge, calls } = makeJudge({ store })
+    const extractor = new Extractor({
+      ctx: makeCtx({ agents: [agent] }),
+      store,
+      judge,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    })
+    await extractor.start()
+    assert.equal(timers.pending(), 0)
+    assert.equal(calls.length, 0)
+    assert.equal(store.getWatermark('sess-test').baseline, true)
+    await extractor.dispose()
+  } finally {
+    await cleanup(home)
+  }
+})
+
+test('extractor: autoExtractExistingSessions opts back into historical catch-up', async () => {
+  const home = await makeHome()
+  try {
+    const store = await makeStore(home)
+    store.setSettings({ autoExtractExistingSessions: true })
+    const events = [userEvent(0, LONG_TEXT)]
+    const { agent } = makeAgent({
+      events,
+      header: { cwd: '/tmp/project', createdAt: Date.now() - 60 * 60 * 1000 },
+    })
+    const timers = makeTimers()
+    const { judge, calls } = makeJudge({ store })
+    const extractor = new Extractor({
+      ctx: makeCtx({ agents: [agent] }),
+      store,
+      judge,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    })
+    extractor.onStatus({ agent, status: 'idle' })
+    assert.equal(timers.pending(), 1)
+    timers.fire()
+    await waitForActivity(store)
+    assert.equal(calls.length, 1)
+    await extractor.dispose()
+  } finally {
+    await cleanup(home)
+  }
+})
+
 test('extractor: disabled memory, opted-out sessions and subagents never call the judge', async () => {
   const home = await makeHome()
   try {
@@ -314,7 +410,7 @@ test('extractor: hourly run limit stops automatic extraction but not manual extr
     assert.equal(calls.length, 0)
     assert.match(store.state.activity[0].reason, /hourly run limit/u)
     const manual = await extractor.extractNow(agent)
-    assert.equal(manual.status, 'ok')
+    assert.equal(manual.status, 'ok', String(manual.reason))
     assert.equal(calls.length, 1)
     await extractor.dispose()
   } finally {

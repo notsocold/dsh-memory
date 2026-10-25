@@ -375,19 +375,33 @@ test('store: change listeners and activity/watermark state', async () => {
   try {
     const store = await makeStore(home)
     let events = 0
+    let topicEvents = 0
     const dispose = store.onChange(() => { events += 1 })
-    store.create({ title: 'Observed', content: 'Observed body.' })
+    const disposeTopics = store.onTopicsChange(() => { topicEvents += 1 })
+    const record = store.create({ title: 'Observed', content: 'Observed body.' }).record
     assert.ok(events >= 1)
+    assert.ok(topicEvents >= 1)
+    const topicsAfterCreate = topicEvents
     store.recordActivity({ trigger: 'manual', status: 'ok', created: 1, projectKey: '/tmp/ws' })
     assert.equal(store.state.activity[0].projectKey, '/tmp/ws')
     store.setWatermark('sess-1', { seq: 4, chars: 12 })
     assert.equal(store.getWatermark('sess-1').seq, 4)
     store.setSessionOptOut('sess-1', true)
     assert.equal(store.isSessionOptOut('sess-1'), true)
+    // Operational state writes never reach the topic-record listener.
+    assert.equal(topicEvents, topicsAfterCreate)
+    store.update(record.id, { content: 'Updated body.' })
+    assert.ok(topicEvents > topicsAfterCreate)
+    const topicsBeforeRemove = topicEvents
+    store.remove(record.id)
+    assert.ok(topicEvents > topicsBeforeRemove)
     const before = events
+    const topicsBeforeDispose = topicEvents
     dispose()
+    disposeTopics()
     store.create({ title: 'After dispose', content: 'No listener.' })
     assert.equal(events, before)
+    assert.equal(topicEvents, topicsBeforeDispose)
   } finally {
     await cleanup(home)
   }

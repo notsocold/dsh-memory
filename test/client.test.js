@@ -83,6 +83,7 @@ test('client: project filter and project-aware actions use projectKey', () => {
   assert.match(SOURCE, /projectKey: item\.projectKey/u)
   assert.match(SOURCE, /projectMaxTopicsInPrompt/u)
   assert.match(SOURCE, /autoSaveMinImportance/u)
+  assert.match(SOURCE, /autoExtractExistingSessions/u)
   assert.match(SOURCE, /page\.storage/u)
 })
 

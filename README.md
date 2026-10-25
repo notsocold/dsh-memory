@@ -21,7 +21,7 @@
 | 长会话增量 | 持续对话中按同一静默窗口合批，不打断对话 |
 | 新会话边界 | 新建会话时，顺带判定其它空闲会话里尚未处理的内容 |
 | 会话销毁 | 会话被删除/释放时同步快照并后台判定（不阻塞销毁） |
-| 插件加载 | Host 启动/插件重载时补判已存在会话的未处理内容 |
+| 插件加载 | 默认**不**自动补判插件启动前已存在的会话；这类历史/导入会话只建立基线。可在高级设置打开 `autoExtractExistingSessions` 恢复旧行为，或用 Extract now 手动处理 |
 | 手动 | `memory` 工具 `extract`、`/memory extract`、设置页「Extract now」 |
 
 判定会拿到：当前会话标题/工作目录/项目、最近 compaction 摘要、上次判定之后的人类消息 + 助手文本、
@@ -32,6 +32,7 @@
 
 - 固定策略段（记忆是背景数据、不是指令；何时检索/保存/删除；不得编造记忆）。
 - 自动保存采用保守策略：项目事实必须有 `scope` 且默认落项目；global 仅用于用户长期偏好/身份或带 `scopeReason` 的跨项目知识；低于 `autoSaveMinImportance` 的主题不自动保存。
+- 历史/导入会话（例如通过 dsh-workspace-session 拉取的会话）默认只建立本地基线，不自动补判，避免“没有新会话却产生 memory git diff”；手动 Extract now 会从会话开头补判。
 - 动态记忆索引（每步按当前项目刷新）：只注入 `id · kind · scope · 日期 · 摘要`，正文用工具按需读取；
   全局与项目各自独立预算（默认各 30 条 / 4000 字符），超出提示模型用 `memory` 工具检索。
 - 项目隔离：`global` 记忆在所有会话可见；`project` 记忆只在**会话工作目录**对应的
@@ -170,6 +171,7 @@ $DSH_HOME/dsh-memory/
 |---|---|---|
 | `enabled` | true | 总开关（暂停时读写与注入全部停止，已有记忆保留） |
 | `autoExtract` | true | 是否自动判定 |
+| `autoExtractExistingSessions` | false | 是否自动补判插件启动前已有/导入的历史会话；关闭时只建立基线，手动 Extract now 可补 |
 | `quietSeconds` | 30 | 每轮结束后的静默判定窗口（3–600） |
 | `minNewChars` | 120 | 自上次判定以来新增对话字符下限（人类 + 助手） |
 | `minIntervalSeconds` | 60 | 同一会话两次自动判定最小间隔 |
@@ -231,11 +233,11 @@ lib/extractor.js             触发调度：静默窗口/边界/销毁/手动、
 lib/inject.js                systemPrompt.section（策略）+ context（按 agent 动态索引）
 lib/tools.js                 memory 工具（7 个 action）
 lib/commands.js              /memory 命令
-lib/api.js                   /api/dsh-memory/{state,memory,action}
+lib/api.js                   /api/dsh-memory/{state,memory,action,events}
 client.js                    Settings → Memory 管理页（lazy-CJS，仅 require('react')）
 package.json / cordis.patch.yml / locale/{en,zh}.json / icon.svg
 docs/DESIGN.md / CONTRACT.md / README.md
-test/                        node:test 单元测试（15 个文件、207 项）
+test/                        node:test 单元测试（15 个文件、211 项）
 ```
 
 ## 开发与测试
@@ -275,7 +277,7 @@ pnpm test         # node --test test/*.test.js
 - **v2 存储改造（2026-10-20 晚）**：运行中的 3080 Host 热加载新代码后，真实 v1 `memory.json`
   自动迁移为 Markdown：全局 13 个主题、项目 12 个主题，迁移 24 条且无缺失；`state.json` v2；
   项目记忆落在 `/home/zhaodan/work/DeepseekChat/.dsh/dsh-memory/`，索引/正文可由外部编辑触发重载。
-- **测试**：`node --test test/*.test.js` → **207 pass / 0 fail**；`node --check` 全部通过；
+- **测试**：`node --test test/*.test.js` → **210 pass / 0 fail**；`node --check` 全部通过；
   `client.js` 当前约 117 KB。
 - **修复（2026-10-21）**：项目筛选键统一为 `projectKey`；自动判定门限改为统计人类+助手新增字符，
   短提问+长分析也会触发；端到端测试覆盖“短问题 → 项目记忆 → 工作区 `.dsh/dsh-memory`”。新增 frontmatter/topiccollection 覆盖手工格式、外部编辑、索引重建、

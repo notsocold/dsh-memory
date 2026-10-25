@@ -56,6 +56,7 @@ window.__ModuleLoader__.load({
 
     const ADVANCED_BOOLEANS = [
       'autoExtract',
+      'autoExtractExistingSessions',
       'projectsEnabled',
       'toolEnabled',
       'allowModelDelete',
@@ -79,6 +80,7 @@ window.__ModuleLoader__.load({
     const SETTINGS_DEFAULTS = {
       enabled: true,
       autoExtract: true,
+      autoExtractExistingSessions: false,
       quietSeconds: 30,
       minNewChars: 120,
       minIntervalSeconds: 60,
@@ -148,7 +150,8 @@ window.__ModuleLoader__.load({
       'activity.status.error': 'Error', 'advanced.title': 'Advanced settings', 'advanced.desc': 'Runtime limits for automatic extraction, recall, and the memory tool.',
       'advanced.save': 'Save settings', 'advanced.saving': 'Saving…', 'advanced.noChanges': 'No advanced settings changed.',
       'advanced.invalid': 'Fix the highlighted fields before saving.', 'advanced.rangeError': 'Enter an integer between {min} and {max}.', 'advanced.autoExtract': 'Automatic extraction',
-      'advanced.autoExtract.hint': 'Let the assistant judge finished spans and save topics.', 'advanced.projectsEnabled': 'Recall project-scoped memories', 'advanced.projectsEnabled.hint': 'Inject memories from the current project in addition to global ones.',
+      'advanced.autoExtract.hint': 'Let the assistant judge finished spans and save topics.', 'advanced.autoExtractExistingSessions': 'Auto-extract historical sessions',
+      'advanced.autoExtractExistingSessions.hint': 'Also judge sessions that already existed when the plugin started (including sessions imported from git). Off by default; use Extract now for deliberate backfill.', 'advanced.projectsEnabled': 'Recall project-scoped memories', 'advanced.projectsEnabled.hint': 'Inject memories from the current project in addition to global ones.',
       'advanced.toolEnabled': 'Expose the memory tool', 'advanced.toolEnabled.hint': 'Allow the model to search, read, and save memories through its tool.', 'advanced.allowModelDelete': 'Allow model-requested deletions',
       'advanced.allowModelDelete.hint': 'The model may forget a memory only when the user explicitly asks.', 'advanced.redactSecrets': 'Redact secrets before saving', 'advanced.redactSecrets.hint': 'Strip credential-like strings from stored titles, summaries, and bodies.',
       'advanced.quietSeconds': 'Quiet period before judging (seconds, 3–600)', 'advanced.quietSeconds.hint': 'How long a conversation must be idle after a turn.', 'advanced.minNewChars': 'Minimum new conversation characters (0–100000)',
@@ -225,7 +228,8 @@ window.__ModuleLoader__.load({
       'activity.status.error': '失败', 'advanced.title': '高级设置', 'advanced.desc': '自动提取、召回和记忆工具的运行时限制。',
       'advanced.save': '保存设置', 'advanced.saving': '正在保存…', 'advanced.noChanges': '没有修改任何高级设置。',
       'advanced.invalid': '请先修正标红的字段。', 'advanced.rangeError': '请输入 {min} 到 {max} 之间的整数。', 'advanced.autoExtract': '自动提取',
-      'advanced.autoExtract.hint': '允许助手判定已结束的对话片段并保存主题。', 'advanced.projectsEnabled': '召回项目级记忆', 'advanced.projectsEnabled.hint': '在全局记忆之外，同时注入当前项目的记忆。',
+      'advanced.autoExtract.hint': '允许助手判定已结束的对话片段并保存主题。', 'advanced.autoExtractExistingSessions': '自动补判历史会话',
+      'advanced.autoExtractExistingSessions.hint': '同时判定插件启动前已存在的会话（包括从 git 导入的会话）。默认关闭；需要补历史时用 Extract now。', 'advanced.projectsEnabled': '召回项目级记忆', 'advanced.projectsEnabled.hint': '在全局记忆之外，同时注入当前项目的记忆。',
       'advanced.toolEnabled': '向模型开放记忆工具', 'advanced.toolEnabled.hint': '允许模型通过工具搜索、读取和保存记忆。', 'advanced.allowModelDelete': '允许模型请求删除',
       'advanced.allowModelDelete.hint': '仅当用户明确要求时，模型才可忘记某条记忆。', 'advanced.redactSecrets': '保存前脱敏密钥', 'advanced.redactSecrets.hint': '从标题、摘要和正文中移除凭据形态的字符串。',
       'advanced.quietSeconds': '判定前静默时长（秒，3–600）', 'advanced.quietSeconds.hint': '一轮对话结束后需静默多久才触发判定。', 'advanced.minNewChars': '最少新增对话字符数（0–100000）',

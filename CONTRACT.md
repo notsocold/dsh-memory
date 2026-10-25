@@ -87,6 +87,7 @@ model: "provider/model"
   "settings": {
     "enabled": true,
     "autoExtract": true,
+    "autoExtractExistingSessions": false, // 是否自动补判启动前已有/导入的历史会话
     "quietSeconds": 30,
     "minNewChars": 120,      // 人类 + 助手新增对话字符下限
     "minIntervalSeconds": 60,
@@ -104,7 +105,7 @@ model: "provider/model"
     "judgeProvider": "",
     "judgeModel": ""
   },
-  "watermarks": { "<sessionId>": { "seq": 0, "at": "ISO", "chars": 0 } },
+  "watermarks": { "<sessionId>": { "seq": 0, "at": "ISO", "chars": 0, "baseline?": true } },
   "sessionOptOut": { "<sessionId>": true },
   "activity": [ /* ≤100，最新在前，可带 projectKey */ ],
   "stats": { "created": 0, "updated": 0, "deleted": 0, "runs": 0, "errors": 0, "migrated": 0 },
@@ -204,6 +205,11 @@ model: "provider/model"
 `memory extract`/`/memory extract`/设置页 Extract now。队列并发 1；门限 `minNewChars`（人类 + 助手新增对话字符）、
 `minIntervalSeconds`、`maxRunsPerHour`；水位线在 drain 前二次校验。
 
+**历史会话基线**：自动提取发现没有本地 watermark、且 session 创建时间早于插件启动（含导入会话）时，
+只把 `watermark` 设为 `baseline:true`（会话当前末尾的 seq），不自动调用模型；
+之后的新事件仍会按 watermark 正常处理。`autoExtractExistingSessions:true` 可恢复启动时补判旧会话。
+手动 `Extract now`（以及 API `fromStart:true`）对 baseline 会话从会话开头处理。
+
 判定使用当前会话模型路由（设置可覆盖 `judgeProvider/judgeModel`），严格 JSON create/update，
 自动永不 delete；落库前密钥脱敏 + 敏感类别策略。
 
@@ -230,11 +236,16 @@ model: "provider/model"
 | `GET /state?sessionId=` | `layout`/`memoryRoot`、settings/stats/所有记忆摘要（含 `projectKey`、`memoryDir`、`file`）/known projects/activity/live sessions |
 | `GET /memory?id=&projectKey=` | 单条完整正文；`projectKey` 用于跨项目定位 |
 | `POST /action` | `create/update/delete/pin/unpin/clear/pause/resume/setSessionOptOut/extractNow/export/setSettings` |
+| `GET /events` | SSE 变更流（`text/event-stream`，15s 心跳）：每次 store 变化（主题写入/外部文件改动/设置）推送一帧 `data: {"type":"change"}`，浏览器据此重取 `/state`，不必轮询；客户端断开时服务端清理订阅 |
+
+- `/events` 使用同源 cookie 认证，与其它 `/api/dsh-memory/*` 路由一致；一帧只表示“库变了”，具体内容由客户端重取 `/state` 并按会话过滤。
+
 
 - `create` 的 `scope:"project"` 接受显式 `project:{key,name}` 或当前 live session 的项目；否则
   `invalid-request`。
 - `update/delete/pin/unpin` 支持 `projectKey` 帮助定位；未提供时回退当前 session 项目再全局查找。
 - `clear` 需 `confirm:true`；无 `projectKey` 时清全局 + 已知项目；带 `projectKey` 只清该项目。
+- `extractNow` 可选 `fromStart:true`：忽略本地 watermark/基线，从会话开头处理。
 - `export` 结构：`{exportedAt,version,layout:"markdown-topic-files",settings,globalMemories,projects:[{key,name,memoryDir,memories}]}`。
 - 设置页状态请求会只读加载 known projects（不创建目录、不注入），使非 live 项目也能查看/编辑。
 
